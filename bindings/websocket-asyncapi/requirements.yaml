@@ -1,0 +1,366 @@
+meta:
+  binding: wss-asyncapi
+  binding_name: WSS + AsyncAPI Protocol Binding for OpenCDC
+  binding_version: 0.3.0-wip
+  tracks_wire: '0.3'
+  tracks_spec: 0.7.0
+  updated: '2026-09-12'
+  intro: 'Binding-scoped requirements register for the WSS + AsyncAPI Protocol Binding. Identifiers are B-WSA-* and are stable once allocated: withdrawn requirements
+    keep their number with level WITHDRAWN and numbers are never reused. "Endpoint" is the producer serving the WebSocket endpoint; "Client" rows are protocol mechanics
+    required for a valid session, not consumer processing guidance (that remains in core Appendix A); "Relay" is a delivery-layer component under B-WSA-20. This register
+    is independent of registry/requirements.yaml in the core; core IDs are never duplicated here. Each requirement line is a hand-written summary that carries the
+    normative verb of its source clause; the binding document is authoritative. Section numbers refer to the binding document. Rows are ordered by identifier; the
+    document orders them by section.'
+requirements:
+- id: B-WSA-1
+  level: MUST
+  who: Endpoint
+  section: '1.3'
+  requirement: Events MUST be carried in CloudEvents structured mode, grouped into batch messages; all CloudEvents and cdc* attributes are top-level keys of each
+    event object.
+- id: B-WSA-2
+  level: MUST
+  who: Endpoint and Client
+  section: '1.4'
+  requirement: The client MUST offer one or more OpenCDC subprotocols in Sec-WebSocket-Protocol in preference order; the server MUST select exactly one and return
+    it, or reject before upgrade with HTTP 400 and no Sec-WebSocket-Protocol header.
+- id: B-WSA-3
+  level: MUST
+  who: Endpoint
+  section: '1.4'
+  requirement: All endpoints MUST support the opencdc.json subprotocol (JSON batch format, text frames); the token identifies the message format only and does not
+    carry the wire version.
+- id: B-WSA-4
+  level: MUST
+  who: Endpoint and Client
+  section: '1.4'
+  requirement: The channel address MUST carry no session parameters; position is a query parameter and credentials are headers or a declared security scheme; neither
+    MUST be encoded in the path or URL userinfo.
+- id: B-WSA-5
+  level: MUST
+  who: Endpoint
+  section: '1.5'
+  requirement: The endpoint MUST be served over TLS 1.2 or later (wss) with a certificate chain that validates under the client's trust store; it MAY require client
+    certificates.
+- id: B-WSA-6
+  level: MUST
+  who: Endpoint and Client
+  section: '1.5'
+  requirement: Credentials MUST NOT appear in the connection URL; accepted schemes are declared in the AsyncAPI document; HTTP Basic only over TLS via the Authorization
+    header.
+- id: B-WSA-7
+  level: MUST
+  who: Endpoint
+  section: '1.5'
+  requirement: Core producer security rules S-AUTH-2, S-AUTHZ-1, S-AUTHZ-2 MUST apply unchanged; the tables declaration MUST reflect only what the connecting principal
+    is authorized to receive.
+- id: B-WSA-8
+  level: MUST
+  who: Endpoint
+  section: '3.1'
+  requirement: Each WebSocket message MUST be one CloudEvents JSON batch (a JSON array of structured-mode events); a single event is a one-element array.
+- id: B-WSA-9
+  level: MUST
+  who: Endpoint
+  section: '3.1'
+  requirement: The server MUST NOT send an empty batch; liveness is signalled by HEARTBEAT events and Ping frames.
+- id: B-WSA-10
+  level: MUST
+  who: Endpoint and Client
+  section: '3.1'
+  requirement: Batch boundaries carry no semantics; a transaction MAY span batches; a client MUST NOT infer transaction completion from a batch boundary.
+- id: B-WSA-11
+  level: SHOULD
+  who: Endpoint
+  section: '3.1'
+  requirement: An endpoint SHOULD align batch boundaries with transaction boundaries when buffering permits; a client MUST NOT rely on it.
+- id: B-WSA-12
+  level: MUST
+  who: Endpoint
+  section: '3.2'
+  requirement: Under opencdc.json, messages MUST be sent as UTF-8 text frames; no binary data frames on such a connection.
+- id: B-WSA-13
+  level: MUST
+  who: Endpoint
+  section: '3.3'
+  requirement: Each event's datacontenttype MUST be application/json; the AsyncAPI defaultContentType (application/cloudevents-batch+json) describes the batch message,
+    not event data.
+- id: B-WSA-14
+  level: MUST
+  who: Endpoint
+  section: '3.4'
+  requirement: No application-level chunking or truncation; large events use RFC 6455 fragmentation; an endpoint that truncates MUST NOT claim the binding for that
+    stream.
+- id: B-WSA-15
+  level: MUST
+  who: Endpoint
+  section: '3.4'
+  requirement: The endpoint MUST advertise maxEventBytes and maxMessageBytes as UTF-8 byte counts before compression, with maxMessageBytes >= maxEventBytes; a client
+    SHOULD size its receive buffer to maxMessageBytes.
+- id: B-WSA-16
+  level: MUST
+  who: Endpoint
+  section: '4.2'
+  requirement: 'Ordering preservation: the server MUST deliver events in emitted order; sequence, cdctxorder, and (pos.lsn, pos.lsn_offset) are preserved as emitted.'
+- id: B-WSA-17
+  level: N/A
+  who: Endpoint
+  section: '4.2'
+  requirement: 'Control-channel retention: not applicable; there is no control channel; STREAM_METADATA and OBJECT_METADATA coverage are established per session (5.2).'
+- id: B-WSA-18
+  level: MUST
+  who: Endpoint
+  section: '4.2'
+  requirement: 'Schema coverage: the server MUST NOT deliver a data event unless its governing OBJECT_METADATA version was delivered earlier on the same connection,
+    and MUST retain every OBJECT_METADATA version governing any retained data event (R-POS-2, R-POS-7).'
+- id: B-WSA-19
+  level: MUST
+  who: Endpoint
+  section: '4.2'
+  requirement: 'Marker retention parity: if TRX_COMMIT markers are emitted they MUST be in-band on the same channel and retained with the data events they complete
+    (P-RET-1).'
+- id: B-WSA-20
+  level: MUST
+  who: Relay
+  section: '4.2'
+  requirement: A relay MUST preserve event order, identity, content, and STREAM_METADATA declarations; it MAY re-batch and re-fragment; it MUST NOT drop, reorder,
+    rewrite, merge, or split events.
+- id: B-WSA-21
+  level: MUST
+  who: Endpoint and Client
+  section: '5.1'
+  requirement: The handshake MUST carry exactly one start selector in the position parameter (now, earliest, RFC 3339 UTC timestamp with Z, or a percent-encoded cdcpos);
+    missing, repeated, or ambiguous values MUST be rejected with HTTP 400; out-of-window timestamps MUST be rejected with HTTP 409, never promoted to earliest.
+- id: B-WSA-22
+  level: MUST
+  who: Endpoint
+  section: '5.1'
+  requirement: A resume request MUST be treated as valid only when its position is a cdcpos this endpoint issued for this stream and configuration, within the replay
+    window; timestamps and keywords are start selectors with no relationship to a prior session's delivery.
+- id: B-WSA-23
+  level: MUST
+  who: Endpoint
+  section: '5.2'
+  requirement: The server MUST emit STREAM_METADATA as the first event of every session; it is session-scoped and carries no cdcpos.
+- id: B-WSA-24
+  level: MUST
+  who: Endpoint
+  section: '5.2'
+  requirement: The server MUST then emit the current OBJECT_METADATA for every active table before the first data event; these re-emissions are session-scoped, carry
+    no cdcpos, and repeat the durable versions' dataschema and schema_version.
+- id: B-WSA-25
+  level: MUST
+  who: Endpoint
+  section: '5.2'
+  requirement: 'Replay start: the server MUST deliver durable events in order from the fixpoint position P computed by the schema-coverage closure over all active
+    tables (5.2), including every event in [P, C], and continue past the cursor C; for now, P = C.'
+- id: B-WSA-26
+  level: MUST
+  who: Endpoint
+  section: '5.3'
+  requirement: The server MUST push without waiting for acknowledgement; no acknowledgement message exists and no server behavior MAY depend on client progress; a
+    client 1000 close is not an acknowledgement of any event.
+- id: B-WSA-27
+  level: MUST
+  who: Endpoint and Client
+  section: '5.3'
+  requirement: The client MUST NOT send data frames; a client data frame is a protocol error and the server MAY close with 4002; client-to-server control messages
+    are reserved.
+- id: B-WSA-28
+  level: MUST
+  who: Endpoint
+  section: '5.4'
+  requirement: The server MUST document its replay window lower bound in x-opencdc.replayWindow and SHOULD keep the window at least as long as the longest client
+    outage it intends to tolerate.
+- id: B-WSA-29
+  level: MUST
+  who: Endpoint
+  section: '5.4'
+  requirement: A start position outside the replay window MUST be refused before upgrade with HTTP 409; the server MUST NOT silently begin elsewhere or deliver from
+    earliest.
+- id: B-WSA-30
+  level: MUST
+  who: Endpoint
+  section: '5.4'
+  requirement: 'Replay MUST satisfy the core Section 8.2 Replay Guarantee Summary: schema before data, order preserved on (pos.lsn, pos.lsn_offset), original ids
+    preserved; sequence MAY differ.'
+- id: B-WSA-31
+  level: MUST
+  who: Endpoint
+  section: '5.4'
+  requirement: Delivery MUST be at-least-once for every event after the cursor; duplicates including the rewound segment are resolved by (source, id); no exactly-once
+    wire mode exists.
+- id: B-WSA-32
+  level: MUST
+  who: Endpoint
+  section: '5.5'
+  requirement: The HEARTBEAT obligation is met only by HEARTBEAT events; Ping/Pong frames MUST NOT be counted as HEARTBEAT.
+- id: B-WSA-33
+  level: SHOULD
+  who: Endpoint
+  section: '5.5'
+  requirement: The server SHOULD send Pings at an interval shorter than any intermediary idle timeout and MAY close unresponsive connections with 1001 or 4004 after
+    a documented grace period.
+- id: B-WSA-34
+  level: MUST
+  who: Endpoint
+  section: '5.6'
+  requirement: 'Durable Mode: under backpressure the server MUST block or buffer and MUST NOT drop, skip, or coalesce; at its buffering limit it MUST close with 4011;
+    the undelivered events remain inside the replay window.'
+- id: B-WSA-35
+  level: WITHDRAWN
+  who: Endpoint
+  section: '5.6'
+  requirement: 'Withdrawn in 0.3.0: Ephemeral Mode delivery is deferred; x-opencdc.operationalMode is fixed at durable in this revision.'
+- id: B-WSA-36
+  level: MUST
+  who: Endpoint
+  section: '5.7'
+  requirement: Filtering that removes DDL events MUST be reflected in ddl_capture none; an endpoint MUST NOT declare verbatim or structural and then withhold emission-schema-affecting
+    DDL (P-DDL-1 to P-DDL-3).
+- id: B-WSA-37
+  level: MUST
+  who: Endpoint
+  section: '5.7'
+  requirement: 'Configuration change: if the filter configuration, captured-table set, or schema-delivery declarations change mid-connection the server MUST emit
+    new STREAM_METADATA in-band (replay-compatible changes only) or close with 4012; non-replay-compatible changes MUST close with 4012 and prior cursors MUST then
+    be refused.'
+- id: B-WSA-38
+  level: MUST
+  who: Endpoint
+  section: '5.7'
+  requirement: Filtering MUST NOT remove individual columns from an image (that is a schema change under core Section 4); filtering operates on whole events.
+- id: B-WSA-39
+  level: MUST
+  who: Endpoint
+  section: '5.7'
+  requirement: If TRX_COMMIT is emitted, event_count and distribution MUST be computed over the emitted events of the transaction so that the core completeness check
+    0..event_count-1 holds exactly.
+- id: B-WSA-40
+  level: MUST
+  who: Endpoint and Client
+  section: '5.8'
+  requirement: The server MUST use the applicable close code and MUST NOT use 1000 for errors; the client MUST treat 1006 as a resumable interruption and MUST NOT
+    interpret any close as confirmation the server observed its progress.
+- id: B-WSA-41
+  level: MUST
+  who: Endpoint
+  section: '6.1'
+  requirement: The AsyncAPI document MUST be retrievable by an authorized client from a documented URL and MUST declare asyncapi 3.1.0+, info, a wss server, exactly
+    one channel per endpoint, exactly one receive operation, and the opencdcBatch message.
+- id: B-WSA-42
+  level: MUST
+  who: Endpoint
+  section: '6.1'
+  requirement: 'The published document takes the client perspective: operation receive, info.description states it is for client generation and that the server pushes,
+    and x-opencdc.perspective MUST be client.'
+- id: B-WSA-43
+  level: MUST
+  who: Endpoint
+  section: '6.1'
+  requirement: The channel MUST carry a ws channel binding declaring position (required query) and Sec-WebSocket-Protocol (required header), and MUST NOT carry ws
+    operation or message bindings.
+- id: B-WSA-44
+  level: MUST
+  who: Endpoint
+  section: '6.1'
+  requirement: defaultContentType MUST be application/cloudevents-batch+json and the server object security MUST list the schemes of 1.5.
+- id: B-WSA-45
+  level: MUST
+  who: Endpoint
+  section: 1.4.2
+  requirement: Conditions evaluable at handshake time MUST be rejected before upgrade with the HTTP status in the 1.4.2 table (400, 401, 403, 404, 409, 503); post-upgrade
+    conditions use the close codes of 5.8.
+- id: B-WSA-46
+  level: MUST
+  who: Client
+  section: '1.5'
+  requirement: The client MUST validate the server's certificate chain and host identity and MUST NOT proceed past a failed validation.
+- id: B-WSA-47
+  level: MUST
+  who: Endpoint
+  section: '1.5'
+  requirement: If the handshake credential expires or is revoked mid-session the server MAY close with 4000 and MUST NOT deliver events past the point it determines
+    the principal is no longer authenticated.
+- id: B-WSA-48
+  level: MUST
+  who: Endpoint
+  section: '1.5'
+  requirement: Authorization is evaluated as of the session; replay MUST NOT deliver events the connecting principal is not currently authorized to receive, regardless
+    of authorization at original emission.
+- id: B-WSA-49
+  level: MUST
+  who: Endpoint
+  section: '3.1'
+  requirement: The server MUST flush any non-empty batch within the advertised maxBatchLingerMs, MUST NOT hold a HEARTBEAT past it, and the bound MUST be shorter
+    than heartbeat_interval_seconds.
+- id: B-WSA-50
+  level: MUST
+  who: Endpoint
+  section: '3.4'
+  requirement: The server MUST split batches so no message exceeds maxMessageBytes; an event exceeding maxEventBytes MUST cause close 4013 and MUST NOT be truncated,
+    dropped, or skipped.
+- id: B-WSA-51
+  level: MUST
+  who: Endpoint
+  section: '5.4'
+  requirement: 'Cursor scope: a cdcpos is scoped to one stream and one configuration identity; a cursor for a different stream or an incompatible configuration MUST
+    be refused with HTTP 409; cursors SHOULD be self-identifying.'
+- id: B-WSA-52
+  level: MUST
+  who: Endpoint
+  section: '5.4'
+  requirement: 'Cursor stability: a cdcpos MUST remain valid with the same meaning across endpoint restarts and equivalent replicas within the replay window, and
+    id, cdcpos, schema_version, and TRX_COMMIT contents MUST be identical on replay; otherwise declare sequence_continuity reset and refuse foreign cursors.'
+- id: B-WSA-53
+  level: MUST
+  who: Endpoint
+  section: '5.7'
+  requirement: 'Dense ordinals: cdctxorder MUST be assigned 0-based and contiguous over the events the endpoint emits after filtering; native source sequence numbers
+    are inputs, not the assignment; gaps are a conformance error (T-ORDER).'
+- id: B-WSA-54
+  level: MUST
+  who: Endpoint
+  section: '5.7'
+  requirement: A transaction none of whose events pass the filter MUST produce no events and no TRX_COMMIT; its cdcxid never appears on the stream.
+- id: B-WSA-55
+  level: MUST
+  who: Endpoint and Client
+  section: '1.7'
+  requirement: An endpoint MUST emit only event types and attributes of the wire version it declares; a client receiving an unsupported cdcspecversion MUST treat
+    it as a protocol error and SHOULD close with 4002.
+- id: B-WSA-56
+  level: MUST
+  who: Endpoint and Client
+  section: '5.2'
+  requirement: A cursor inside a transaction causes replay to re-deliver that transaction from its first event; the client MUST NOT assume the first data event after
+    the cursor begins a new transaction.
+- id: B-WSA-57
+  level: MUST
+  who: Endpoint
+  section: '5.8'
+  requirement: Close codes 4003 and 4010 are withdrawn; their conditions are evaluated before upgrade as HTTP 400 and 409; a server MUST NOT emit them.
+- id: B-WSA-58
+  level: MUST
+  who: Endpoint
+  section: '6.1'
+  requirement: The endpoint MUST validate its published document with the AsyncAPI parser and MUST record the parser version and at least one generator/template combination
+    with which a client has been produced and exercised against the endpoint.
+- id: B-WSA-59
+  level: MUST
+  who: Endpoint
+  section: '6.4'
+  requirement: The oneOf MUST cover every event type the endpoint may emit under wire 0.3 with branches mutually exclusive on type; a stretch type omitted from the
+    oneOf MUST never be emitted on the channel.
+- id: B-WSA-60
+  level: MUST
+  who: Endpoint
+  section: '6.4'
+  requirement: Every schema reference MUST be a Multi-Format Schema Object with schemaFormat application/schema+json;version=draft-2020-12, and the endpoint MUST
+    verify its parser and generator support that dialect.
+- id: B-WSA-61
+  level: MUST
+  who: Endpoint
+  section: '6.4'
+  requirement: Every $ref MUST resolve to an immutable resource (pinned release, content-addressed, or bundled); moving-branch URLs are not permitted; each branch
+    MUST validate a complete structured-mode event (envelope allOf data schema).

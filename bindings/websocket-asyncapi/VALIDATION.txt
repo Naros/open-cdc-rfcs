@@ -1,0 +1,10 @@
+@asyncapi/cli/6.0.2 linux-x64 node-v22.22.2
+Validation record for asyncapi-template.yaml, 2026-09-12
+- Tool: @asyncapi/cli (version above), `asyncapi validate`
+- Input: asyncapi-template.yaml with SCHEMA_BASE/ replaced by ./ and the
+  wire 0.3 schemas from spec repo `schemas/` (main, 2026-09-12) placed alongside
+- Result: "File asyncapi.yaml is valid ... referenced documents don't have
+  governance issues"
+- Not yet done: client generation (B-WSA-58 generator/template pin); requires
+  an endpoint to exercise against.
+Quality gates (bindings/tools/check_binding.py): 19/19 pass.

@@ -1,0 +1,153 @@
+asyncapi: 3.1.0
+id: urn:example:opencdc:finance-orders
+info:
+  title: FINANCE.ORDERS change stream
+  version: "1.0.0"
+  description: >
+    OpenCDC 0.3 / WSS+AsyncAPI Binding 0.3. This document is written from the
+    client's perspective for code generation; the server pushes events.
+    Row-value filters, if any, are evaluated against the after image.
+    Validated with @asyncapi/parser 3.x; client generated and exercised with
+    @asyncapi/generator and the websocket-client-template (see release notes).
+defaultContentType: application/cloudevents-batch+json
+
+servers:
+  prod:
+    host: cdc.example.com:9102
+    protocol: wss
+    protocolVersion: "13"
+    security:
+      - $ref: '#/components/securitySchemes/bearer'
+
+channels:
+  ordersStream:
+    address: /streams/finance-orders
+    title: FINANCE.ORDERS OpenCDC stream
+    bindings:
+      ws:
+        bindingVersion: 0.1.0
+        method: GET
+        query:
+          type: object
+          required: [position]
+          properties:
+            position:
+              type: string
+          additionalProperties: false
+        headers:
+          type: object
+          required: [Sec-WebSocket-Protocol]
+          properties:
+            Sec-WebSocket-Protocol:
+              type: string
+              pattern: '(^|,\s*)opencdc\.json(\s*,|$)'
+            Authorization:
+              type: string
+    x-opencdc:
+      binding: wss-asyncapi
+      bindingVersion: "0.3.0"
+      perspective: client
+      subprotocols: [opencdc.json]
+      operationalMode: durable
+      replayWindow: P7D
+      maxEventBytes: 16777216
+      maxMessageBytes: 67108864
+      maxBatchLingerMs: 250
+    messages:
+      opencdcBatch:
+        $ref: '#/components/messages/opencdcBatch'
+
+operations:
+  onEvents:
+    action: receive
+    channel:
+      $ref: '#/channels/ordersStream'
+    summary: Receive OpenCDC event batches in emitted order.
+
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+  messages:
+    opencdcBatch:
+      name: opencdcBatch
+      contentType: application/cloudevents-batch+json
+      payload:
+        schemaFormat: application/schema+json;version=draft-2020-12
+        schema:
+          type: array
+          minItems: 1
+          items:
+            oneOf:
+              - $ref: '#/components/schemas/streamMetadata'
+              - $ref: '#/components/schemas/objectMetadata'
+              - $ref: '#/components/schemas/heartbeat'
+              - $ref: '#/components/schemas/dml'
+              - $ref: '#/components/schemas/ddl'
+              - $ref: '#/components/schemas/trxCommit'
+  schemas:
+    envelope:
+      schemaFormat: application/schema+json;version=draft-2020-12
+      schema:
+        $ref: 'SCHEMA_BASE/opencdc-envelope.schema.json'
+    streamMetadata:
+      schemaFormat: application/schema+json;version=draft-2020-12
+      schema:
+        allOf:
+          - $ref: 'SCHEMA_BASE/opencdc-envelope.schema.json'
+          - properties:
+              type:
+                pattern: '\\.cdc\\.meta\\.STREAM_METADATA$'
+              data:
+                $ref: 'SCHEMA_BASE/opencdc-stream-metadata.schema.json'
+    objectMetadata:
+      schemaFormat: application/schema+json;version=draft-2020-12
+      schema:
+        allOf:
+          - $ref: 'SCHEMA_BASE/opencdc-envelope.schema.json'
+          - properties:
+              type:
+                pattern: '\\.cdc\\.meta\\.OBJECT_METADATA$'
+              data:
+                $ref: 'SCHEMA_BASE/opencdc-object-metadata.schema.json'
+    heartbeat:
+      schemaFormat: application/schema+json;version=draft-2020-12
+      schema:
+        allOf:
+          - $ref: 'SCHEMA_BASE/opencdc-envelope.schema.json'
+          - properties:
+              type:
+                pattern: '\\.cdc\\.meta\\.HEARTBEAT$'
+              data:
+                $ref: 'SCHEMA_BASE/opencdc-heartbeat.schema.json'
+    dml:
+      schemaFormat: application/schema+json;version=draft-2020-12
+      schema:
+        allOf:
+          - $ref: 'SCHEMA_BASE/opencdc-envelope.schema.json'
+          - properties:
+              type:
+                pattern: '\\.cdc\\.(dml\\.(INSERT|UPDATE|DELETE|UPSERT|TRUNCATE)|snapshot\\.READ)$'
+              data:
+                $ref: 'SCHEMA_BASE/opencdc-dml.schema.json'
+    ddl:
+      schemaFormat: application/schema+json;version=draft-2020-12
+      schema:
+        allOf:
+          - $ref: 'SCHEMA_BASE/opencdc-envelope.schema.json'
+          - properties:
+              type:
+                pattern: '\\.cdc\\.ddl\\.(CREATE|ALTER|DROP)$'
+              data:
+                $ref: 'SCHEMA_BASE/opencdc-ddl.schema.json'
+    trxCommit:
+      schemaFormat: application/schema+json;version=draft-2020-12
+      schema:
+        allOf:
+          - $ref: 'SCHEMA_BASE/opencdc-envelope.schema.json'
+          - properties:
+              type:
+                pattern: '\\.cdc\\.meta\\.TRX_COMMIT$'
+              data:
+                $ref: 'SCHEMA_BASE/opencdc-trx-commit.schema.json'

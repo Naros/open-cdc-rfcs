@@ -1,0 +1,18 @@
+# Proposed addition to registry/versions.yaml. Binding versions are
+# <wire>.<revision>: the wire protocol the binding maps, then the binding
+# document's own revision. "-wip" marks drafting and is dropped at release.
+# Pin release references to tags, not branches.
+bindings:
+  wss_asyncapi:
+    directory: bindings/websocket-asyncapi
+    version: "0.3.0-wip"
+    wire_protocol: "0.3"
+    tracks_spec: "0.7.0"
+    profile: durable, json-batch, opencdc.json
+    role: normative when claimed
+  kafka:
+    directory: bindings/kafka
+    version: "0.3.0-wip"
+    wire_protocol: "0.3"
+    tracks_spec: "0.7.0"
+    role: normative when claimed

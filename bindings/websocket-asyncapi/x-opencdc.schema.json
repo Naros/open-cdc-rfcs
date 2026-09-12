@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opencdc.org/schemas/bindings/wss-asyncapi/x-opencdc.schema.json",
+  "title": "x-opencdc channel extension for the WSS + AsyncAPI Protocol Binding (0.3.0)",
+  "description": "Endpoint declarations for the OpenCDC WSS + AsyncAPI binding. These are normative for the endpoint (Section 6.3). They are not stream declarations; those live in STREAM_METADATA. Clients MUST ignore members they do not recognise.",
+  "type": "object",
+  "required": [
+    "binding",
+    "bindingVersion",
+    "perspective",
+    "subprotocols",
+    "operationalMode",
+    "replayWindow",
+    "maxEventBytes",
+    "maxMessageBytes",
+    "maxBatchLingerMs"
+  ],
+  "properties": {
+    "binding": {
+      "const": "wss-asyncapi"
+    },
+    "bindingVersion": {
+      "type": "string",
+      "pattern": "^0\\.3\\.[0-9]+$",
+      "description": "Binding document version, <wire>.<revision>, without any -wip suffix."
+    },
+    "perspective": {
+      "const": "client",
+      "description": "Fixed by B-WSA-42."
+    },
+    "subprotocols": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^opencdc\\.[a-z0-9]+$" },
+      "contains": { "const": "opencdc.json" },
+      "description": "Subprotocols this endpoint accepts; MUST include opencdc.json (B-WSA-3)."
+    },
+    "operationalMode": {
+      "const": "durable",
+      "description": "Fixed in this revision (5.6). Ephemeral Mode is deferred."
+    },
+    "replayWindow": {
+      "type": "string",
+      "description": "ISO 8601 duration (e.g. P7D) or a URI of the retention policy (B-WSA-28).",
+      "anyOf": [
+        { "pattern": "^P(?!$)(\\d+Y)?(\\d+M)?(\\d+W)?(\\d+D)?(T(?=\\d)(\\d+H)?(\\d+M)?(\\d+S)?)?$" },
+        { "format": "uri" }
+      ]
+    },
+    "maxEventBytes": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Largest serialized event, UTF-8 bytes before transport compression (B-WSA-15)."
+    },
+    "maxMessageBytes": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Largest batch message after reassembly, UTF-8 bytes; MUST be >= maxEventBytes (B-WSA-15)."
+    },
+    "maxBatchLingerMs": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Upper bound on how long an event waits in an unfilled batch (B-WSA-49). MUST be less than heartbeat_interval_seconds * 1000."
+    },
+    "closeCodes": {
+      "type": "array",
+      "description": "Endpoint-specific close codes beyond Section 5.8, in the 4000-4999 range and not colliding with the binding's codes.",
+      "items": {
+        "type": "object",
+        "required": ["code", "name"],
+        "properties": {
+          "code": {
+            "type": "integer",
+            "minimum": 4000,
+            "maximum": 4999,
+            "not": { "enum": [4000, 4001, 4002, 4003, 4004, 4010, 4011, 4012, 4013, 4020] }
+          },
+          "name": { "type": "string" },
+          "description": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": true
+}

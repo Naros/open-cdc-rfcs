@@ -364,7 +364,7 @@ requirements:
   who: Publisher and Client
   section: '3.5'
   requirement: On a compacted data topic a publisher MAY write a tombstone after a DELETE and SHOULD write one for the old key after a key-changing UPDATE; tombstones
-    MUST carry no content-type or ce_ headers, and clients MUST ignore null-value records.
+    MUST carry no content-type or ce_ headers, and a client MUST NOT treat a tombstone as an OpenCDC event.
 - id: B-KFK-63
   level: MUST
   who: Client

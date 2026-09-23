@@ -420,7 +420,10 @@ The hazard for key changes is avoided by emitting a DELETE under the old key and
 - **B-KFK-62.** On a data topic with compaction enabled, a publisher MAY write a tombstone after a `dml.DELETE`, and SHOULD write one for the old key after a `dml.UPDATE` that changes the primary key.
   A tombstone is a record with a null value and the key, and therefore the partition, of the row it removes (B-KFK-21, B-KFK-22).
   It MUST NOT carry a `content-type` or `ce_` header, it is not an event, and it is never counted in `event_count`.
-  A client MUST ignore records with a null value on data topics.
+  A client MUST NOT treat a tombstone as an OpenCDC event: it has no `id`, `cdcxid`, or position, takes no part in deduplication by `(source, id)`, and does not count toward a transaction's completeness.
+  Whether a client otherwise ignores tombstones or uses one as a signal that its key was removed is consumer processing and outside this binding.
+
+*Note.* Every tombstone on a claimed stream follows the event that removed its key, so a client that treats tombstones as deletes removes the row once from the event and once from the tombstone, with the same result.
 
 *Note.* An OpenCDC DELETE carries its before image, so it is never itself a tombstone and does not remove its key under compaction; the tombstone is what lets compaction eventually drop a deleted row.
 Without the tombstone for the old key, a primary-key change leaves the row's previous record under that key, and a sink that bootstraps from the compacted region restores a row that no longer exists.

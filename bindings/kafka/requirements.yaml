@@ -49,8 +49,8 @@ requirements:
   level: MUST
   who: Deployment
   section: '1.4'
-  requirement: Every data topic MUST have cleanup.policy delete, compact, or compact,delete; with compaction, min.compaction.lag.ms MUST be at least replayWindow,
-    the descriptor MUST declare compacted true, and the window MUST NOT be unbounded.
+  requirement: Every data topic MUST have cleanup.policy delete, compact, or compact,delete; with compaction, min.compaction.lag.ms MUST be set explicitly, and records
+    older than the lag are table state.
 - id: B-KFK-8
   level: SHOULD
   who: Deployment
@@ -162,8 +162,8 @@ requirements:
   level: MUST
   who: Publisher and Deployment
   section: '3.6'
-  requirement: The descriptor MUST declare maxEventBytes; broker, every stream topic (control included), and producer limits MUST admit it with headroom for key,
-    headers, and overhead; an oversized event MUST stop publishing and MUST NOT be truncated, dropped, skipped, or diverted.
+  requirement: Broker message.max.bytes and topic max.message.bytes MUST be set on every stream topic and max.request.size MUST be at least the topic limit; a record
+    rejected as too large MUST stop publishing and MUST NOT be truncated, dropped, skipped, or diverted.
 - id: B-KFK-28
   level: MUST
   who: Publisher
@@ -265,10 +265,10 @@ requirements:
     the published events.
 - id: B-KFK-45
   level: MUST
-  who: Publisher and Deployment
+  who: Deployment
   section: '5.5'
-  requirement: The descriptor MUST declare replayWindow no longer than any data topic retention.ms or compaction lag (or unbounded only for delete-only topics with
-    infinite retention), and retention or lag MUST NOT be reduced below it.
+  requirement: The replay window MUST be taken as the smallest data-topic retention.ms (delete) or min.compaction.lag.ms (compact, or retention.ms if smaller); it
+    belongs to the deployment and clients read it from topic configuration.
 - id: B-KFK-46
   level: MUST
   who: Publisher and Deployment
@@ -305,8 +305,8 @@ requirements:
   level: MUST
   who: Client
   section: '5.8'
-  requirement: A client MUST keep reading the control topic, MUST subscribe to added data topics from their beginning offsets, and MUST stop if a topic's partition
-    count differs from the descriptor.
+  requirement: A client MUST keep reading the control topic, MUST subscribe to added data topics from their beginning offsets, and MUST stop if a stream topic's partition
+    count changes while it consumes.
 - id: B-KFK-53
   level: MUST
   who: Publisher and Client
@@ -329,8 +329,8 @@ requirements:
   level: MUST
   who: Publisher and Deployment
   section: '6.2'
-  requirement: The descriptor MUST validate against stream-descriptor.schema.json and MUST describe the deployment as it is, listing every data topic with its partition
-    count and subjects.
+  requirement: The descriptor MUST validate against stream-descriptor.schema.json and MUST describe the stream layout as it is, listing every data topic with the
+    subjects it may carry.
 - id: B-KFK-57
   level: MUST
   who: Publisher and Deployment
@@ -370,11 +370,17 @@ requirements:
   level: MUST
   who: Client
   section: '5.5'
-  requirement: On a compacted data topic a client MUST treat records older than replayWindow as table state, MUST NOT expect their transactions or markers to be complete,
-    and MUST expect cdctxorder gaps among them.
+  requirement: On a data topic whose cleanup.policy includes compact a client MUST treat records older than min.compaction.lag.ms as table state, MUST NOT expect
+    their transactions or markers to be complete, and MUST expect cdctxorder gaps among them.
 - id: B-KFK-64
   level: MUST
   who: Client
   section: '5.4'
   requirement: A client assembling transactions MUST include control-topic DDL events by cdcxid and cdctxorder, and MUST NOT process as a new change a DDL event whose
     TRX_COMMIT precedes its transaction-topic start position.
+- id: B-KFK-65
+  level: MUST
+  who: Deployment
+  section: '6.1'
+  requirement: The deployment MUST grant Describe and DescribeConfigs on every stream topic to each principal authorized to read the stream, so clients can read partition
+    counts, cleanup.policy, retention, compaction lag, and size limits.

@@ -170,7 +170,7 @@ Beyond the window, each partition keeps at least the latest record per key, and 
 That retained state is not a substitute for a snapshot, and a reader that takes it as current table state is right only in part:
 
 - A DELETE remains the latest record for its key, so a reader that inspects the event sees the row as removed.
-  A reader that treats any non-null value as a present row sees the removal only if the publisher wrote a tombstone (B-KFK-62), and only if its scan reaches the tombstone within `delete.retention.ms` of the tombstone becoming eligible for removal.
+  A reader that treats any non-null value as a present row sees the removal only if the publisher wrote a tombstone (B-KFK-62), and only if its scan reaches the tombstone within `delete.retention.ms` of the log cleaner's first pass over it, which comes no earlier than `min.compaction.lag.ms` after the tombstone is written.
 - After a primary-key change, the old key keeps its last record unless the publisher wrote a tombstone for it (B-KFK-62).
 - A TRUNCATE is keyed by its subject (B-KFK-21) and removes no row key.
   Replayed in offset order on a single-partition topic it still takes effect correctly; on a multi-partition topic, beyond the window, nothing orders it against the table's rows in other partitions.

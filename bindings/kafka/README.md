@@ -161,7 +161,7 @@ The *channel* of core Terms and Definitions corresponds to a partition, not a to
 - **B-KFK-6 (Deployment).** The transaction topic MUST have exactly one partition and a `cleanup.policy` of `delete`.
 - **B-KFK-7 (Deployment).** Every data topic MUST have a `cleanup.policy` of `delete`, `compact`, or `compact,delete`.
   On a data topic with compaction enabled, the deployment MUST set `min.compaction.lag.ms` explicitly; its default of 0 would give the stream a replay window of zero (B-KFK-45).
-  Records older than a compacted topic's lag are table state, the latest record per key, rather than an OpenCDC changelog (B-KFK-63).
+  Records older than a compacted topic's lag are table state, at least the latest record per key and possibly no other, rather than an OpenCDC changelog (B-KFK-63).
 
 *Why compaction is admitted.* Compaction on a data topic is a broker storage optimization: once a later record for a key supersedes an earlier one, the broker need not keep the earlier one.
 Kafka never compacts a record newer than the topic's `min.compaction.lag.ms`, and that lag bounds the replay window (B-KFK-45), so every event a client reads within the window is intact and in order, exactly as on a `delete` topic.
@@ -203,7 +203,7 @@ Topic: finance-orders.opencdc.control  PartitionCount: 1  RF: 3
   cleanup.policy=compact  max.message.bytes=8650752
   min.insync.replicas=2  unclean.leader.election.enable=false
 Topic: finance-orders.opencdc.transactions  PartitionCount: 1  RF: 3
-  cleanup.policy=delete  retention.ms=691200000  retention.bytes=-1
+  cleanup.policy=delete  retention.ms=777600000  retention.bytes=-1
   min.insync.replicas=2  unclean.leader.election.enable=false
 Topic: finance-orders.FINANCE.ORDERS  PartitionCount: 6  RF: 3
   cleanup.policy=delete  retention.ms=604800000  retention.bytes=-1
@@ -215,7 +215,7 @@ Topic: finance-orders.FINANCE.ORDER_LINES  PartitionCount: 6  RF: 3
   min.insync.replicas=2  unclean.leader.election.enable=false
 ```
 
-The transaction topic's `retention.ms` (8 days) exceeds the data topics' `retention.ms` plus `segment.ms` (7 days plus 1 day) by more than the retention check interval, as B-KFK-35 requires.
+The transaction topic's `retention.ms` (9 days) exceeds the data topics' `retention.ms` plus `segment.ms` plus the broker's default `log.retention.check.interval.ms` (7 days, 1 day, and 5 minutes), as B-KFK-35 requires.
 `max.message.bytes` (8.25 MiB) is set on every stream topic, the control topic included, so an event up to about 8 MiB fits with room for its key, headers, and batch overhead (B-KFK-27).
 
 ### 1.5. Security
@@ -231,7 +231,7 @@ This binding fixes the mechanism.
   SASL `PLAIN` is permitted only over TLS.
   Credentials MUST NOT appear in record headers, record keys, or topic names; core S-AUTH-2 already forbids them in events.
 - **B-KFK-13 (Deployment).** The deployment MUST NOT grant `Write` on a stream's topics, or `Write` on the publisher's `TransactionalId`, to any principal other than the publisher, or a relay writing to its own target topics.
-  It MUST restrict `Alter`, `AlterConfigs`, `CreatePartitions`, and `Delete` (which permits `DeleteRecords`) on stream topics to administrators.
+  It MUST restrict `Alter` (which also authorizes `CreatePartitions`), `AlterConfigs`, and `Delete` (which permits `DeleteRecords`) on stream topics to administrators.
   A principal that can write to a data topic can inject events that clients cannot distinguish from the producer's; one that can alter a topic can undo the configuration this binding relies on (4.2, 5.5, 5.8).
 - **B-KFK-14 (Deployment).** The stream is the unit of authorization.
   Kafka ACLs are topic-grained, and every principal that can read the control topic can read every captured table's schema and the stream's `tables` declaration.
@@ -616,8 +616,8 @@ Assembly strategies, bounded waits, and subset consumption by `distribution` are
 *Note.* The window is not declared by the publisher, because the publisher does not own it and a declared copy would drift whenever an operator changes a topic.
 An operator that reduces retention or a compaction lag removes replayable positions; a client resuming from one meets the gap handling of B-KFK-40.
 Operators are expected to publish the window they intend to keep alongside the stream address (6.1).
-- **B-KFK-63 (Client).** On a data topic whose `cleanup.policy` includes `compact`, a client MUST treat records whose record timestamp is older than the topic's `min.compaction.lag.ms` as table state, not as a changelog.
-  It MUST NOT expect transactions among those records to be complete or their TRX_COMMIT markers to be available, and MUST expect `cdctxorder` gaps among them.
+- **B-KFK-63 (Client).** On a data topic whose `cleanup.policy` includes `compact`, a client MUST treat records whose record timestamp is older than the topic's `min.compaction.lag.ms` as table state, not as a changelog, whether or not the publisher writes tombstones (B-KFK-62): compaction removes superseded records for a key regardless of tombstones, and may not yet have removed all of them.
+  It MUST NOT expect transactions among those records to be complete or their TRX_COMMIT markers to be available, MUST NOT take a marker's presence on the transaction topic as evidence that the transaction's records survive on this topic (B-KFK-35 requires the transaction topic's `retention.ms` to exceed, for every data topic, that topic's replay horizon plus `segment.ms` plus the broker's `log.retention.check.interval.ms`), and MUST expect `cdctxorder` gaps among them.
   Records inside the lag are an unaltered changelog, as on any other data topic.
 
 *Note.* B-KFK-63 relies on record timestamps being publish times (B-KFK-41).
@@ -625,7 +625,8 @@ A client that bootstraps from compacted state and then continues into the change
 
 *Note.* Size-based retention (`retention.bytes`) is excluded by B-KFK-35, because a window measured in bytes cannot be compared across topics of different volume.
 A size limit also deletes a partition's oldest segments whenever it grows past the limit, so a burst of changes can remove records younger than the replay window.
-Tiered storage ([KIP-405][kip-405]) changes where segments live, not when they are deleted, and is compatible with this binding.
+Tiered storage ([KIP-405][kip-405]) changes where segments live, not when they are deleted, and is compatible with this binding on topics whose `cleanup.policy` is `delete`.
+Apache Kafka (as of 4.3) rejects tiered storage on a topic whose `cleanup.policy` includes `compact`, so it does not apply to the control topic or to a compacted data topic; a Kafka-compatible service may differ.
 
 ### 5.6. Publishing Durability
 
@@ -873,7 +874,7 @@ None is ratified; each is a place where this draft made a call so that review ha
 Not in this revision; each would be a document revision, not a wire change:
 
 1. **Single-partition ordered profile.** A stream on one data topic with one partition preserves `ordering_scope: "stream"` end to end.
-   Claiming it needs a structural guarantee that the partition count cannot change (for example, an `AlterConfigs` and `CreatePartitions` ACL policy), which this revision does not define ([core Appendix B.4][core-b4]).
+   Claiming it needs a structural guarantee that the partition count cannot change (for example, an `Alter` and `AlterConfigs` ACL policy), which this revision does not define ([core Appendix B.4][core-b4]).
 2. **Ephemeral Mode.** Requires a core-approved loss signal.
 3. **Format composition** (Avro, Protocol Buffers), including schema-registry serializers.
 4. **AsyncAPI template** with Kafka channel bindings and an `x-opencdc` extension naming the stream's topic roles.

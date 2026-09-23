@@ -499,7 +499,7 @@ A single-partition profile that would preserve `ordering_scope: "stream"` end to
 - **B-KFK-34 (Schema retention across the replay window).** Because the control topic never removes a schema version, every OBJECT_METADATA version that governs a retained data event remains retrievable, which realizes R-POS-7 for the whole replay window.
   In addition, the publisher MUST NOT write a record to a data topic whose `dataschema` names an OBJECT_METADATA version until that version's control-topic record has been acknowledged by the cluster.
   A client that sees a data-topic event can therefore always find its schema on the control topic (5.3).
-- **B-KFK-35 (Marker retention parity).** The deployment MUST set `retention.bytes=-1` on the transaction topic and on every data topic.
+- **B-KFK-35 (Marker retention parity).** The deployment MUST set `retention.bytes=-1` on the transaction topic and on every data topic whose `cleanup.policy` includes `delete`; on a `compact`-only topic the setting has no effect.
   It MUST set the transaction topic's `retention.ms` greater than the maximum, over the data topics, of the topic's replay horizon plus `segment.ms` plus the broker's `log.retention.check.interval.ms`, where a data topic's replay horizon is its `min.compaction.lag.ms` if compaction is enabled and its `retention.ms` otherwise.
   If any data topic with `cleanup.policy=delete` has `retention.ms=-1`, the transaction topic MUST as well.
   Kafka deletes whole segments, so a data record can outlive its topic's `retention.ms` by up to one segment roll; the margin keeps the marker for every retained data event (P-RET-1, R-POS-6).
@@ -600,6 +600,7 @@ Assembly strategies, bounded waits, and subset consumption by `distribution` are
 A client that bootstraps from compacted state and then continues into the changelog crosses from state to events at the window boundary; how it reconciles the two is consumer guidance, comparable to the snapshot-to-steady-state transition ([core Appendix A.8][core-a8]).
 
 *Note.* Size-based retention (`retention.bytes`) is excluded by B-KFK-35, because a window measured in bytes cannot be compared across topics of different volume.
+A size limit also deletes a partition's oldest segments whenever it grows past the limit, so a burst of changes can remove records younger than the declared replay window.
 Tiered storage ([KIP-405][kip-405]) changes where segments live, not when they are deleted, and is compatible with this binding.
 
 ### 5.6. Publishing Durability

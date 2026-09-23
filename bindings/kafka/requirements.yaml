@@ -209,8 +209,8 @@ requirements:
   level: MUST
   who: Deployment
   section: '4.2'
-  requirement: (Marker retention parity) retention.bytes MUST be -1 on transaction and data topics, and transaction-topic retention.ms MUST exceed the maximum data
-    replay horizon (retention.ms, or min.compaction.lag.ms when compacting) plus segment.ms plus the retention check interval.
+  requirement: (Marker retention parity) retention.bytes MUST be -1 on the transaction topic and on data topics whose cleanup.policy includes delete, and transaction-topic
+    retention.ms MUST exceed the maximum data replay horizon plus segment.ms plus the retention check interval.
 - id: B-KFK-36
   level: MUST
   who: Relay

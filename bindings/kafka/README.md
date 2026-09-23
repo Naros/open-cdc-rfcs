@@ -158,8 +158,14 @@ The *channel* of core Terms and Definitions corresponds to a partition, not a to
 - **B-KFK-5 (Deployment).** The control topic MUST have exactly one partition and a `cleanup.policy` of exactly `compact`.
   The value `compact,delete` does not satisfy this rule, because time-based deletion would remove schema versions (4.2).
 - **B-KFK-6 (Deployment).** The transaction topic MUST have exactly one partition and a `cleanup.policy` of `delete`.
-- **B-KFK-7 (Deployment).** Every data topic MUST have a `cleanup.policy` of `delete`.
-  A compacted data topic keeps only the latest record per key; it is a materialization of table state, not an OpenCDC stream, and destroys the events that transaction completeness and replay depend on.
+- **B-KFK-7 (Deployment).** Every data topic MUST have a `cleanup.policy` of `delete`, `compact`, or `compact,delete`.
+  On a data topic with compaction enabled, `min.compaction.lag.ms` MUST be at least the declared `replayWindow` (B-KFK-45), so that no event inside the replay window is ever compacted, and the topic's descriptor entry MUST declare `"compacted": true` (6.2).
+  A stream with a compacted data topic MUST NOT declare an `unbounded` replay window.
+  Beyond the replay window a compacted data topic holds table state, the latest record per key, rather than an OpenCDC changelog (B-KFK-63).
+
+*Why compaction is admitted.* A compacted change topic doubles as a table-state source: a new sink can bootstrap from the latest record per key without a fresh snapshot, and this is common practice with Debezium, whose delete tombstones exist for it.
+Kafka never compacts records newer than `min.compaction.lag.ms`, so with the lag at least the replay window, every event a client may replay is intact, exactly as on a `delete` topic.
+Only the region beyond the window changes, from nothing to table state.
 - **B-KFK-8.** The control and transaction topics SHOULD be named `<stream>.opencdc.control` and `<stream>.opencdc.transactions`, where `<stream>` is the stream name (6.2).
   Data topics MAY have any legal Kafka topic name.
   In every case the stream descriptor, not the naming convention, is authoritative.
@@ -169,7 +175,7 @@ The *channel* of core Terms and Definitions corresponds to a partition, not a to
 | ----------- | ---------- | ---------------- | ------------------------------------------------------------------------ | ----------------------------------------- |
 | Control     | 1          | `compact`        | Stream descriptor; STREAM_METADATA; durable OBJECT_METADATA              | Fixed per record kind (B-KFK-23)          |
 | Transaction | 1          | `delete`         | TRX_COMMIT; HEARTBEAT                                                    | `cdcxid` for TRX_COMMIT; none for HEARTBEAT |
-| Data        | Fixed, 1 or more | `delete`   | `dml.*` (including TRUNCATE), `ddl.*`, `snapshot.READ`; OBJECT_METADATA only after a `ddl.CREATE` (B-KFK-59) | Row identity, or the subject (B-KFK-21)   |
+| Data        | Fixed, 1 or more | `delete`, or compaction with a lag (B-KFK-7) | `dml.*` (including TRUNCATE), `ddl.*`, `snapshot.READ`; OBJECT_METADATA only after a `ddl.CREATE` (B-KFK-59); tombstones on compacted topics (B-KFK-62) | Row identity, or the subject (B-KFK-21)   |
 
 *Why a transaction topic with one partition.* Data events are spread over many partitions and lose their cross-partition order.
 The transaction topic restores it: because it has one partition, one writer (B-KFK-60), and the publisher writes markers in commit order (B-KFK-43), the sequence of TRX_COMMIT records on it, after deduplication by `(source, id)`, is the source commit order of the stream.
@@ -235,7 +241,7 @@ Every OpenCDC binding declares the transport capabilities it relies on, so that 
 | Per-record metadata headers         | Yes (record format v2, Kafka 0.11 and later)           | Binary content mode available (3.3)                                            |
 | Key-based partition assignment      | Yes; the partitioner is a client-side function         | Row identity fixes the partition (3.4); relays preserve partition numbers (B-KFK-36) |
 | Broker-side retention               | Yes, per topic, by time or size                        | Replay window is the data topics' time retention (5.5)                          |
-| Log compaction                      | Yes, per key                                           | Control topic keeps every schema version (4.2)                                  |
+| Log compaction                      | Yes, per key, never within `min.compaction.lag.ms`     | Control topic keeps every schema version (4.2); data topics MAY compact beyond the replay window (B-KFK-7) |
 | Consumer-driven replay              | Seek by offset or by record timestamp                  | No producer involvement in replay (5.2)                                         |
 | Idempotent and transactional producer | Yes                                                  | Per-partition order survives retries (4.2); transactions optional (5.6)         |
 | Record size limit                   | `max.message.bytes`, `message.max.bytes`, `max.request.size` | Fail closed on oversized events; no chunking (3.6)                        |
@@ -401,9 +407,18 @@ This is the same hazard Debezium avoids by emitting a DELETE and a CREATE for a 
 
 ### 3.5. Non-Event Records
 
-- **B-KFK-25.** A publisher MUST NOT write any record that is not an OpenCDC event to a data topic or the transaction topic, including records with a null value (tombstones).
+- **B-KFK-25.** A publisher MUST NOT write any record that is not an OpenCDC event to a data topic or the transaction topic, including records with a null value (tombstones), except as B-KFK-62 permits on compacted data topics.
   The only non-event record on the control topic is the stream descriptor.
   A publisher MUST NOT write tombstones to the control topic.
+- **B-KFK-62.** On a data topic with compaction enabled, a publisher MAY write a tombstone after a `dml.DELETE`, and SHOULD write one for the old key after a `dml.UPDATE` that changes the primary key.
+  A tombstone is a record with a null value and the key, and therefore the partition, of the row it removes (B-KFK-21, B-KFK-22).
+  It MUST NOT carry a `content-type` or `ce_` header, it is not an event, and it is never counted in `event_count`.
+  A client MUST ignore records with a null value on data topics.
+
+*Note.* An OpenCDC DELETE carries its before image, so it is never itself a tombstone and does not remove its key under compaction; the tombstone is what lets compaction eventually drop a deleted row.
+Without the tombstone for the old key, a primary-key change leaves the row's previous record under that key, and a sink that bootstraps from the compacted region restores a row that no longer exists.
+A TRUNCATE is keyed by its subject (B-KFK-21), so compaction keeps it alongside every earlier row of the table under their own keys, and a bootstrapping sink restores rows the TRUNCATE removed.
+This revision does not fix the TRUNCATE case (Section 8, open item 8).
 
 ### 3.6. Size Limits
 
@@ -466,8 +481,9 @@ A single-partition profile that would preserve `ordering_scope: "stream"` end to
 - **B-KFK-34 (Schema retention across the replay window).** Because the control topic never removes a schema version, every OBJECT_METADATA version that governs a retained data event remains retrievable, which realizes R-POS-7 for the whole replay window.
   In addition, the publisher MUST NOT write a data record whose `dataschema` names an OBJECT_METADATA version until that version's control-topic record has been acknowledged by the cluster, with one exception: a `ddl.CREATE` whose `dataschema` is a forward reference ([core Section 9.1][core-9-1]) precedes its OBJECT_METADATA, as the core requires, and is governed by B-KFK-59.
   A client that sees any other data event can therefore always find its schema on the control topic (5.3).
-- **B-KFK-35 (Marker retention parity).** The deployment MUST set `retention.bytes=-1` on the transaction topic and on every data topic, and MUST set the transaction topic's `retention.ms` greater than the maximum, over the data topics, of `retention.ms` plus `segment.ms` plus the broker's `log.retention.check.interval.ms`.
-  If any data topic has `retention.ms=-1`, the transaction topic MUST as well.
+- **B-KFK-35 (Marker retention parity).** The deployment MUST set `retention.bytes=-1` on the transaction topic and on every data topic.
+  It MUST set the transaction topic's `retention.ms` greater than the maximum, over the data topics, of the topic's replay horizon plus `segment.ms` plus the broker's `log.retention.check.interval.ms`, where a data topic's replay horizon is its `min.compaction.lag.ms` if compaction is enabled and its `retention.ms` otherwise.
+  If any data topic with `cleanup.policy=delete` has `retention.ms=-1`, the transaction topic MUST as well.
   Kafka deletes whole segments, so a data record can outlive its topic's `retention.ms` by up to one segment roll; the margin keeps the marker for every retained data event (P-RET-1, R-POS-6).
 - **B-KFK-36 (Intermediary integrity).** A relay that copies a stream MUST copy all of its topics, control and transaction topics included, and MUST deliver them under a configuration that satisfies 1.4 and 4.2.
   It MUST preserve, for every record: the partition number, the order within the partition, the key, the value, and the `content-type` and `ce_` headers.
@@ -548,9 +564,15 @@ Assembly strategies, bounded waits, and subset consumption by `distribution` are
 
 ### 5.5. Replay Window and Retention
 
-- **B-KFK-45 (Publisher and Deployment).** The descriptor MUST declare `replayWindow`: an ISO 8601 duration no longer than the smallest `retention.ms` of the data topics, or `unbounded` when every data topic has `retention.ms=-1`.
-  The deployment MUST NOT reduce retention below the declared window.
+- **B-KFK-45 (Publisher and Deployment).** The descriptor MUST declare `replayWindow`: an ISO 8601 duration no longer than any data topic's `retention.ms` (where it deletes by time) or `min.compaction.lag.ms` (where it compacts), or `unbounded` when every data topic has `cleanup.policy=delete` and `retention.ms=-1`.
+  The deployment MUST NOT reduce retention or the compaction lag below the declared window.
   Records older than the declared window may still be present; they are outside the claim.
+- **B-KFK-63 (Client).** On a data topic whose descriptor entry declares `"compacted": true`, a client MUST treat records whose record timestamp is older than the declared `replayWindow` as table state, not as a changelog.
+  It MUST NOT expect transactions among those records to be complete or their TRX_COMMIT markers to be available, and MUST expect `cdctxorder` gaps among them.
+  Records inside the window are an unaltered changelog, as on any other data topic.
+
+*Note.* B-KFK-63 relies on record timestamps being publish times (B-KFK-41).
+A client that bootstraps from compacted state and then continues into the changelog crosses from state to events at the window boundary; how it reconciles the two is consumer guidance, comparable to the snapshot-to-steady-state transition ([core Appendix A.8][core-a8]).
 
 *Note.* Size-based retention (`retention.bytes`) is excluded by B-KFK-35, because a window measured in bytes cannot be compared across topics of different volume.
 Tiered storage ([KIP-405][kip-405]) changes where segments live, not when they are deleted, and is compatible with this binding.
@@ -681,7 +703,7 @@ Its schema is published as [stream-descriptor.schema.json](stream-descriptor.sch
 | `contentMode`      | Yes      | `structured` or `binary`, for data and transaction topics (B-KFK-1)                                  |
 | `controlTopic`     | Yes      | Name of the topic holding this descriptor; a copy whose value differs was not rewritten by its relay (B-KFK-36) |
 | `transactionTopic` | Yes      | Name of the transaction topic                                                                        |
-| `dataTopics`       | Yes      | One entry per data topic: `topic`, `partitions`, `subjects` (B-KFK-30, B-KFK-52)                      |
+| `dataTopics`       | Yes      | One entry per data topic: `topic`, `partitions`, `subjects` (B-KFK-30, B-KFK-52), and `compacted` (optional, default `false`; B-KFK-7) |
 | `replayWindow`     | Yes      | ISO 8601 duration or `unbounded` (B-KFK-45)                                                          |
 | `maxEventBytes`    | Yes      | Largest record value admitted, UTF-8 bytes before compression (B-KFK-27)                             |
 
@@ -715,7 +737,7 @@ Rows rest on the public documentation only; a *verified* column will be added on
 | Topic routing SMT (`ByLogicalTableRouter`)                        | Mapped with constraint          | Several subjects per data topic are allowed if listed in the descriptor; the key must still satisfy B-KFK-21 (4)              |
 | Partition routing SMT (`PartitionRouting`)                        | Mapped with constraint          | Must be a deterministic function of row identity (B-KFK-21, B-KFK-22)                                                          |
 | `message.key.columns`                                             | Mapped with constraint          | Only immutable columns preserve per-row partitioning; mutable key columns move a row between partitions (B-KFK-21)             |
-| `tombstones.on.delete`                                            | Fixed `false`                   | Tombstones are not events (B-KFK-25)                                                                                           |
+| `tombstones.on.delete`                                            | Mapped with constraint          | `true` only on compacted data topics (B-KFK-62); `false` otherwise, since tombstones are not events (B-KFK-25)                 |
 | `provide.transaction.metadata`                                    | Converted                       | Debezium `END` records map to TRX_COMMIT; `BEGIN` records have no OpenCDC counterpart (5)                                      |
 | `topic.transaction` (`<prefix>.transaction`)                      | Mapped                          | Transaction topic; must have one partition (B-KFK-6) and hold HEARTBEAT (B-KFK-49)                                             |
 | `heartbeat.interval.ms`, `topic.heartbeat.prefix`                 | Converted                       | Debezium heartbeats are source-offset keep-alives on their own topic; OpenCDC HEARTBEAT goes to the transaction topic (B-KFK-49) |
@@ -772,6 +794,8 @@ None is ratified; each is a place where this draft made a call so that review ha
 8. An AsyncAPI document is optional (6.3).
    Unlike the WSS + AsyncAPI binding, the description format is not part of the binding's name or purpose.
 9. Revised before first circulation after a drafting review, which found and fixed: descriptor misread as a binary-mode CloudEvent (B-KFK-2, B-KFK-3); `ddl.CREATE` forward references against core Section 9.1 (B-KFK-34, B-KFK-59); durability weaker than core Section 15.1 (B-KFK-46); no single writer for the transaction topic (B-KFK-60); marker visibility only SHOULD (B-KFK-43); markers lost by early offset commits (B-KFK-61); relay mode conversion, ACL coverage, size headroom, and HEARTBEAT wording (B-KFK-36, B-KFK-13, B-KFK-27, 5.7).
+10. Data-topic compaction is admitted, with `min.compaction.lag.ms` at least the replay window (B-KFK-7, B-KFK-62, B-KFK-63).
+    The first draft forbade it outright; that was revised on 23 September 2026 after review, because compacted change topics are common practice as table-state sources and compaction beyond the window does not affect any replayable event.
 
 ### 8.2. Deferred Features
 
@@ -817,6 +841,8 @@ Recorded so they are not lost:
 5. **Validation against captured Debezium output** with the CloudEvents converter, to add the *verified* column to Section 7.
 6. **Kafka-compatible services.** A short note, per service, of which 1.6 capabilities it lacks (for example log compaction or record headers on some tiers).
 7. **Descriptor media type.** Whether to register `application/vnd.opencdc.kafka-descriptor+json` or choose another name.
+8. **TRUNCATE on compacted data topics.** Compacted state keeps rows a TRUNCATE removed (3.5 note).
+   Options include tombstoning every key of the table (which requires the publisher to know them), excluding TRUNCATE from compacted streams, or declaring that compacted state is not valid across a TRUNCATE.
 
 ## 9. References
 
@@ -857,6 +883,7 @@ Recorded so they are not lost:
 [core-a1]: ../../spec/OpenCDC-Specification.md#a1-step-1----connect-and-read-stream_metadata-first
 [core-a2]: ../../spec/OpenCDC-Specification.md#a2-step-2----acquire-and-cache-the-schema-object_metadata
 [core-a4]: ../../spec/OpenCDC-Specification.md#a4-step-4----order-and-assemble
+[core-a8]: ../../spec/OpenCDC-Specification.md#a8-special-events
 [core-a7]: ../../spec/OpenCDC-Specification.md#a7-step-7----replay-resume-and-sequence-continuity
 [core-a10]: ../../spec/OpenCDC-Specification.md#a10-multi-channel-transaction-completeness-trx_commit
 [core-b3]: ../../spec/OpenCDC-Specification.md#b3-transport-specific-implementation-notes

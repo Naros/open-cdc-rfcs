@@ -49,7 +49,8 @@ requirements:
   level: MUST
   who: Deployment
   section: '1.4'
-  requirement: Every data topic MUST have cleanup.policy delete; a compacted data topic is a materialization, not an OpenCDC stream.
+  requirement: Every data topic MUST have cleanup.policy delete, compact, or compact,delete; with compaction, min.compaction.lag.ms MUST be at least replayWindow,
+    the descriptor MUST declare compacted true, and the window MUST NOT be unbounded.
 - id: B-KFK-8
   level: SHOULD
   who: Deployment
@@ -150,7 +151,8 @@ requirements:
   level: MUST
   who: Publisher
   section: '3.5'
-  requirement: A publisher MUST NOT write non-event records or tombstones to data or transaction topics, and MUST NOT write tombstones to the control topic.
+  requirement: A publisher MUST NOT write non-event records or tombstones to data or transaction topics except tombstones on compacted data topics (B-KFK-62), and
+    MUST NOT write tombstones to the control topic.
 - id: B-KFK-26
   level: MUST
   who: Publisher
@@ -207,7 +209,7 @@ requirements:
   who: Deployment
   section: '4.2'
   requirement: (Marker retention parity) retention.bytes MUST be -1 on transaction and data topics, and transaction-topic retention.ms MUST exceed the maximum data
-    retention.ms plus segment.ms plus the retention check interval (or be -1).
+    replay horizon (retention.ms, or min.compaction.lag.ms when compacting) plus segment.ms plus the retention check interval.
 - id: B-KFK-36
   level: MUST
   who: Relay
@@ -263,8 +265,8 @@ requirements:
   level: MUST
   who: Publisher and Deployment
   section: '5.5'
-  requirement: The descriptor MUST declare replayWindow no longer than the smallest data-topic retention.ms (or unbounded), and retention MUST NOT be reduced below
-    it.
+  requirement: The descriptor MUST declare replayWindow no longer than any data topic retention.ms or compaction lag (or unbounded only for delete-only topics with
+    infinite retention), and retention or lag MUST NOT be reduced below it.
 - id: B-KFK-46
   level: MUST
   who: Publisher and Deployment
@@ -356,3 +358,15 @@ requirements:
   who: Client
   section: '5.4'
   requirement: A client MUST NOT commit a transaction-topic offset past a TRX_COMMIT until it has finished processing that transaction.
+- id: B-KFK-62
+  level: MUST
+  who: Publisher and Client
+  section: '3.5'
+  requirement: On a compacted data topic a publisher MAY write a tombstone after a DELETE and SHOULD write one for the old key after a key-changing UPDATE; tombstones
+    MUST carry no content-type or ce_ headers, and clients MUST ignore null-value records.
+- id: B-KFK-63
+  level: MUST
+  who: Client
+  section: '5.5'
+  requirement: On a compacted data topic a client MUST treat records older than replayWindow as table state, MUST NOT expect their transactions or markers to be complete,
+    and MUST expect cdctxorder gaps among them.

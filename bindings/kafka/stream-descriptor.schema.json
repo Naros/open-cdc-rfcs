@@ -29,7 +29,10 @@
       "description": "Stream name; the <stream> of the topic naming convention (B-KFK-8)."
     },
     "contentMode": {
-      "enum": ["structured", "binary"],
+      "enum": [
+        "structured",
+        "binary"
+      ],
       "description": "CloudEvents content mode of every record on the data and transaction topics (B-KFK-1). Control-topic records are always structured (B-KFK-2)."
     },
     "controlTopic": {
@@ -44,9 +47,15 @@
       "minItems": 1,
       "items": {
         "type": "object",
-        "required": ["topic", "partitions", "subjects"],
+        "required": [
+          "topic",
+          "partitions",
+          "subjects"
+        ],
         "properties": {
-          "topic": { "$ref": "#/$defs/topicName" },
+          "topic": {
+            "$ref": "#/$defs/topicName"
+          },
           "partitions": {
             "type": "integer",
             "minimum": 1,
@@ -56,8 +65,16 @@
             "type": "array",
             "minItems": 1,
             "uniqueItems": true,
-            "items": { "type": "string", "minLength": 1 },
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
             "description": "Subjects whose events may appear on this topic (B-KFK-30)."
+          },
+          "compacted": {
+            "type": "boolean",
+            "default": false,
+            "description": "True when the topic has compaction enabled; min.compaction.lag.ms is then at least replayWindow, and records older than replayWindow are table state (B-KFK-7, B-KFK-63)."
           }
         },
         "additionalProperties": true
@@ -67,8 +84,12 @@
       "type": "string",
       "description": "ISO 8601 duration no longer than the smallest data-topic retention.ms, or 'unbounded' (B-KFK-45).",
       "anyOf": [
-        { "pattern": "^P(?!$)(\\d+Y)?(\\d+M)?(\\d+W)?(\\d+D)?(T(?=\\d)(\\d+H)?(\\d+M)?(\\d+S)?)?$" },
-        { "const": "unbounded" }
+        {
+          "pattern": "^P(?!$)(\\d+Y)?(\\d+M)?(\\d+W)?(\\d+D)?(T(?=\\d)(\\d+H)?(\\d+M)?(\\d+S)?)?$"
+        },
+        {
+          "const": "unbounded"
+        }
       ]
     },
     "maxEventBytes": {

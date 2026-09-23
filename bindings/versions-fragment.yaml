@@ -15,4 +15,5 @@ bindings:
     version: "0.3.0-wip"
     wire_protocol: "0.3"
     tracks_spec: "0.7.0"
+    profile: durable, partitioned, control + transaction topics, json (structured or binary)
     role: normative when claimed

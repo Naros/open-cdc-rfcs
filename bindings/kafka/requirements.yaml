@@ -1,0 +1,358 @@
+meta:
+  binding: kafka
+  binding_name: Kafka Protocol Binding for OpenCDC
+  binding_version: 0.3.0-wip
+  tracks_wire: '0.3'
+  tracks_spec: 0.7.0
+  updated: '2026-09-23'
+  intro: 'Binding-scoped requirements register for the Kafka Protocol Binding. Identifiers are B-KFK-* and are stable once allocated: withdrawn requirements keep
+    their number with level WITHDRAWN and numbers are never reused. "Publisher" is the component writing OpenCDC events to Kafka; "Deployment" is the Kafka cluster
+    and the configuration of the stream topics (the delivery layer); "Client" rows are protocol mechanics required to read the stream correctly, not consumer processing
+    guidance (that remains in core Appendix A); "Relay" is a component copying the stream under B-KFK-36. This register is independent of registry/requirements.yaml
+    in the core; core IDs are never duplicated here. Each requirement line is a hand-written summary that carries the normative verb of its source clause; the binding
+    document is authoritative. Section numbers refer to the binding document. Rows are ordered by identifier; the document orders them by section.'
+requirements:
+- id: B-KFK-1
+  level: MUST
+  who: Publisher
+  section: '1.3'
+  requirement: Each event MUST be carried in one Kafka record in structured or binary mode, and every data-topic and transaction-topic record MUST use the content
+    mode declared in the stream descriptor.
+- id: B-KFK-2
+  level: MUST
+  who: Publisher
+  section: '1.3'
+  requirement: Event records on the control topic MUST use structured mode regardless of the declared content mode.
+- id: B-KFK-3
+  level: MUST
+  who: Client
+  section: '1.3'
+  requirement: A client MUST support both content modes and MUST determine each event record's mode from its content-type header; on the control topic it MUST classify
+    records by key first, and the descriptor is never parsed as a CloudEvent.
+- id: B-KFK-4
+  level: MUST
+  who: Publisher and Deployment
+  section: '1.4'
+  requirement: A stream MUST consist of exactly one control topic, one transaction topic, and one or more data topics in one cluster; a topic MUST NOT carry records
+    of more than one stream.
+- id: B-KFK-5
+  level: MUST
+  who: Deployment
+  section: '1.4'
+  requirement: The control topic MUST have exactly one partition and cleanup.policy of exactly compact (compact,delete does not satisfy the rule).
+- id: B-KFK-6
+  level: MUST
+  who: Deployment
+  section: '1.4'
+  requirement: The transaction topic MUST have exactly one partition and cleanup.policy delete.
+- id: B-KFK-7
+  level: MUST
+  who: Deployment
+  section: '1.4'
+  requirement: Every data topic MUST have cleanup.policy delete; a compacted data topic is a materialization, not an OpenCDC stream.
+- id: B-KFK-8
+  level: SHOULD
+  who: Deployment
+  section: '1.4'
+  requirement: Control and transaction topics SHOULD be named <stream>.opencdc.control and <stream>.opencdc.transactions; data topics MAY have any legal name; the
+    descriptor is authoritative.
+- id: B-KFK-9
+  level: MUST
+  who: Publisher
+  section: '1.4'
+  requirement: Each topic MUST carry only the records listed for its role in the Section 1.4 table; a data topic carries OBJECT_METADATA only after a forward-referencing
+    ddl.CREATE.
+- id: B-KFK-10
+  level: MUST
+  who: Deployment
+  section: '1.5'
+  requirement: Every listener used for a claimed stream MUST use TLS 1.2 or later (SSL or SASL_SSL); PLAINTEXT and SASL_PLAINTEXT do not satisfy the binding.
+- id: B-KFK-11
+  level: MUST
+  who: Publisher and Client
+  section: '1.5'
+  requirement: The publisher and clients MUST validate the broker certificate chain and host identity and MUST NOT proceed past a failed validation.
+- id: B-KFK-12
+  level: MUST
+  who: Publisher and Client
+  section: '1.5'
+  requirement: Principals MUST authenticate with mutual TLS or SASL (SCRAM, OAUTHBEARER, GSSAPI; PLAIN only over TLS); credentials MUST NOT appear in headers, keys,
+    topic names, or the descriptor.
+- id: B-KFK-13
+  level: MUST
+  who: Deployment
+  section: '1.5'
+  requirement: The deployment MUST NOT grant Write on stream topics or the publisher TransactionalId to any principal but the publisher or a relay, and MUST restrict
+    Alter, AlterConfigs, CreatePartitions, and Delete to administrators.
+- id: B-KFK-14
+  level: MUST
+  who: Deployment
+  section: '1.5'
+  requirement: The stream is the unit of authorization; a table or schema that must be withheld from some readers MUST be placed in a separate stream; core S-AUTH-2,
+    S-AUTHZ-1, S-AUTHZ-2 apply unchanged.
+- id: B-KFK-15
+  level: MUST
+  who: Publisher and Client
+  section: '1.7'
+  requirement: A publisher MUST emit only event types and attributes of its declared wire version; a client reading an unsupported cdcspecversion MUST stop at that
+    record and MUST NOT skip it.
+- id: B-KFK-16
+  level: MUST
+  who: Client
+  section: '1.7'
+  requirement: A client MUST ignore unrecognised descriptor members and MUST refuse a stream whose descriptor bindingVersion has an unsupported wire component.
+- id: B-KFK-17
+  level: MUST
+  who: Publisher
+  section: '2'
+  requirement: cdcpos and every other event field MUST NOT encode Kafka coordinates (cluster id, topic, partition, offset).
+- id: B-KFK-18
+  level: MUST
+  who: Publisher and Client
+  section: '3.1'
+  requirement: Each record MUST carry exactly one event and the CloudEvents batch format MUST NOT be used; a client MUST NOT infer transaction completion from Kafka
+    batch or fetch boundaries.
+- id: B-KFK-19
+  level: MUST
+  who: Publisher
+  section: '3.2'
+  requirement: In structured mode the value MUST be the JSON event format in UTF-8 with content-type application/cloudevents+json; charset=UTF-8; optional ce_ headers
+    MUST equal the value's attributes.
+- id: B-KFK-20
+  level: MUST
+  who: Publisher
+  section: '3.3'
+  requirement: In binary mode the value MUST be data as UTF-8 JSON, content-type MUST carry datacontenttype, and each other present attribute MUST appear as exactly
+    one ce_ header in canonical string form.
+- id: B-KFK-21
+  level: MUST
+  who: Publisher
+  section: '3.4'
+  requirement: A data-topic record key MUST be a deterministic function of subject and, for row events of keyed tables, the primary key values; the JSON-array encoding
+    SHOULD be used.
+- id: B-KFK-22
+  level: MUST
+  who: Publisher
+  section: '3.4'
+  requirement: The partition of a data-topic record MUST be a deterministic function of key and partition count that does not change for the life of the stream.
+- id: B-KFK-23
+  level: MUST
+  who: Publisher
+  section: '3.4'
+  requirement: Control-topic keys MUST be opencdc:descriptor, opencdc:stream-metadata, and opencdc:object-metadata:<id>; a TRX_COMMIT key MUST be its cdcxid and a
+    HEARTBEAT record MUST have no key.
+- id: B-KFK-24
+  level: MUST
+  who: Publisher
+  section: '3.4'
+  requirement: The partitionkey attribute is carried unchanged, and a publisher MUST NOT use it as the record key unless doing so satisfies B-KFK-21.
+- id: B-KFK-25
+  level: MUST
+  who: Publisher
+  section: '3.5'
+  requirement: A publisher MUST NOT write non-event records or tombstones to data or transaction topics, and MUST NOT write tombstones to the control topic.
+- id: B-KFK-26
+  level: MUST
+  who: Publisher
+  section: '3.6'
+  requirement: No application-level chunking or truncation is defined; a publisher that truncates events MUST NOT claim the binding for that stream.
+- id: B-KFK-27
+  level: MUST
+  who: Publisher and Deployment
+  section: '3.6'
+  requirement: The descriptor MUST declare maxEventBytes; broker, every stream topic (control included), and producer limits MUST admit it with headroom for key,
+    headers, and overhead; an oversized event MUST stop publishing and MUST NOT be truncated, dropped, skipped, or diverted.
+- id: B-KFK-28
+  level: MUST
+  who: Publisher
+  section: '4.1'
+  requirement: STREAM_METADATA MUST declare session_aware false or omit it.
+- id: B-KFK-29
+  level: MUST
+  who: Publisher
+  section: '4.1'
+  requirement: STREAM_METADATA MUST declare transaction_boundaries commit_all and transaction_marker_delivery transaction_metadata_channel, and a TRX_COMMIT MUST
+    be emitted for every transaction.
+- id: B-KFK-30
+  level: MUST
+  who: Publisher
+  section: '4.1'
+  requirement: The tables declaration MUST equal the union of descriptor subjects, events for a subject MUST appear only on topics listing it, and reconnect coverage
+    MUST be declared as the core requires for a sessionless producer.
+- id: B-KFK-31
+  level: SHOULD
+  who: Publisher
+  section: '4.1'
+  requirement: A publisher that assigns events to topics and partitions within the producing process SHOULD declare ordering_scope channel.
+- id: B-KFK-32
+  level: MUST
+  who: Publisher
+  section: '4.2'
+  requirement: (Ordering preservation) Within each partition the publisher MUST write records in emitted order and MUST configure idempotence or a single in-flight
+    request so retries cannot reorder.
+- id: B-KFK-33
+  level: MUST
+  who: Deployment
+  section: '4.2'
+  requirement: (Control-channel retention) The control topic MUST keep the latest descriptor, the latest STREAM_METADATA, and every OBJECT_METADATA version for the
+    life of the stream.
+- id: B-KFK-34
+  level: MUST
+  who: Publisher and Deployment
+  section: '4.2'
+  requirement: (Schema retention across the replay window) Every schema version stays retrievable, and a data record MUST NOT be written until its OBJECT_METADATA
+    control-topic record is acknowledged, except a forward-referencing ddl.CREATE (B-KFK-59).
+- id: B-KFK-35
+  level: MUST
+  who: Deployment
+  section: '4.2'
+  requirement: (Marker retention parity) retention.bytes MUST be -1 on transaction and data topics, and transaction-topic retention.ms MUST exceed the maximum data
+    retention.ms plus segment.ms plus the retention check interval (or be -1).
+- id: B-KFK-36
+  level: MUST
+  who: Relay
+  section: '4.2'
+  requirement: (Intermediary integrity) A relay MUST copy all stream topics and preserve partition, order, key, value, and headers; it MUST NOT drop, filter, re-key,
+    or recompute partitions; a whole-stream mode conversion MUST restore core attribute types; renames MUST be reflected in the descriptor.
+- id: B-KFK-37
+  level: MUST
+  who: Publisher
+  section: '5.1'
+  requirement: Before the first data-topic or transaction-topic record, the publisher MUST write the descriptor and STREAM_METADATA to the control topic and have
+    both acknowledged.
+- id: B-KFK-38
+  level: MUST
+  who: Client
+  section: '5.1'
+  requirement: Before processing data or transaction records a client MUST read the control topic to its startup end offset keeping the last record per key, and MUST
+    process STREAM_METADATA first.
+- id: B-KFK-39
+  level: MUST
+  who: Client
+  section: '5.2'
+  requirement: A resuming client MUST resume every partition of every stream topic it reads, the transaction topic included, from offsets committed only after processing.
+- id: B-KFK-40
+  level: MUST
+  who: Client
+  section: '5.2'
+  requirement: A client MUST NOT let auto.offset.reset reposition it silently; it MUST use auto.offset.reset none and surface an invalid or expired committed offset
+    as a gap.
+- id: B-KFK-41
+  level: MUST
+  who: Publisher
+  section: '5.2'
+  requirement: Record timestamps are publish times; a publisher SHOULD leave them to the producer or use LogAppendTime and MUST NOT set them to the event time or
+    any source time.
+- id: B-KFK-42
+  level: MUST
+  who: Client
+  section: '5.3'
+  requirement: On a data event whose dataschema is not cached, a client MUST read the control topic to its current end before treating the event as undecodable.
+- id: B-KFK-43
+  level: MUST
+  who: Publisher
+  section: '5.4'
+  requirement: A TRX_COMMIT MUST be written after its transaction's events and in source commit order, and MUST NOT become visible before its data records are acknowledged.
+- id: B-KFK-44
+  level: MUST
+  who: Publisher
+  section: '5.4'
+  requirement: Publisher filtering MUST take effect before cdctxorder assignment and marker computation; ordinals MUST be dense and markers MUST describe exactly
+    the published events.
+- id: B-KFK-45
+  level: MUST
+  who: Publisher and Deployment
+  section: '5.5'
+  requirement: The descriptor MUST declare replayWindow no longer than the smallest data-topic retention.ms (or unbounded), and retention MUST NOT be reduced below
+    it.
+- id: B-KFK-46
+  level: MUST
+  who: Publisher and Deployment
+  section: '5.6'
+  requirement: The publisher MUST write with acks=all; the deployment MUST disable unclean leader election, MUST set min.insync.replicas to at least 2, and MUST use
+    a replication factor of at least min.insync.replicas plus 1.
+- id: B-KFK-47
+  level: MUST
+  who: Publisher
+  section: '5.6'
+  requirement: The publisher MUST NOT advance its source checkpoint past an event until its record is acknowledged; restarts re-emit with original ids.
+- id: B-KFK-48
+  level: MUST
+  who: Publisher and Client
+  section: '5.6'
+  requirement: A publisher MAY use Kafka transactions, but a client MUST NOT use Kafka transaction boundaries in place of TRX_COMMIT; clients SHOULD read with read_committed.
+- id: B-KFK-49
+  level: MUST
+  who: Publisher
+  section: '5.7'
+  requirement: HEARTBEAT events MUST be written to the transaction topic; broker or consumer-group liveness does not satisfy the HEARTBEAT obligation.
+- id: B-KFK-50
+  level: MUST
+  who: Publisher
+  section: '5.8'
+  requirement: Before the first record on an added data topic or for an added subject, the publisher MUST write an updated descriptor (and STREAM_METADATA as the
+    core requires) and have them acknowledged.
+- id: B-KFK-51
+  level: MUST
+  who: Deployment
+  section: '5.8'
+  requirement: The partition count of a stream topic MUST NOT change while the stream exists; repartitioning is a new stream.
+- id: B-KFK-52
+  level: MUST
+  who: Client
+  section: '5.8'
+  requirement: A client MUST keep reading the control topic, MUST subscribe to added data topics from their beginning offsets, and MUST stop if a topic's partition
+    count differs from the descriptor.
+- id: B-KFK-53
+  level: MUST
+  who: Publisher and Client
+  section: '5.9'
+  requirement: On a non-retriable error the publisher MUST stop publishing and a client MUST stop at the failing record; neither MAY skip, divert, or tolerate past
+    it.
+- id: B-KFK-54
+  level: MUST
+  who: Client
+  section: '5.9'
+  requirement: Nothing a client does is an acknowledgement to the publisher; a client MUST NOT treat an offset commit, clean shutdown, or rebalance as confirmation
+    of observed progress.
+- id: B-KFK-55
+  level: MUST
+  who: Deployment
+  section: '6.1'
+  requirement: The stream address is the bootstrap servers plus the control topic name, and the operator of a claimed deployment MUST make it available to authorized
+    clients.
+- id: B-KFK-56
+  level: MUST
+  who: Publisher and Deployment
+  section: '6.2'
+  requirement: The descriptor MUST validate against stream-descriptor.schema.json and MUST describe the deployment as it is, listing every data topic with its partition
+    count and subjects.
+- id: B-KFK-57
+  level: MUST
+  who: Publisher and Deployment
+  section: '6.2'
+  requirement: The descriptor MUST NOT restate or contradict stream declarations, except that data-topic subjects are a derived restatement of tables and MUST agree
+    with it.
+- id: B-KFK-58
+  level: MAY
+  who: Deployment
+  section: '6.3'
+  requirement: A deployment MAY publish an AsyncAPI 3.x document with Kafka bindings; if it does, its topic configuration MUST match the deployment and the descriptor
+    governs on conflict.
+- id: B-KFK-59
+  level: MUST
+  who: Publisher
+  section: '5.3'
+  requirement: After a forward-referencing ddl.CREATE the publisher MUST write the named OBJECT_METADATA to the same data partition and to the control topic, both
+    acknowledged before the subject's first DML or snapshot.READ.
+- id: B-KFK-60
+  level: MUST
+  who: Publisher
+  section: '5.6'
+  requirement: Exactly one producer instance at a time MUST write the transaction topic, each data partition MUST have at most one writer at a time, and a new instance
+    MUST fence the previous one (transactional.id or equivalent).
+- id: B-KFK-61
+  level: MUST
+  who: Client
+  section: '5.4'
+  requirement: A client MUST NOT commit a transaction-topic offset past a TRX_COMMIT until it has finished processing that transaction.

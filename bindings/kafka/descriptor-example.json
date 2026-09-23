@@ -1,0 +1,22 @@
+{
+  "binding": "kafka",
+  "bindingVersion": "0.3.0",
+  "stream": "finance-orders",
+  "contentMode": "binary",
+  "controlTopic": "finance-orders.opencdc.control",
+  "transactionTopic": "finance-orders.opencdc.transactions",
+  "dataTopics": [
+    {
+      "topic": "finance-orders.FINANCE.ORDERS",
+      "partitions": 6,
+      "subjects": ["FINANCE.ORDERS"]
+    },
+    {
+      "topic": "finance-orders.FINANCE.ORDER_LINES",
+      "partitions": 6,
+      "subjects": ["FINANCE.ORDER_LINES"]
+    }
+  ],
+  "replayWindow": "P7D",
+  "maxEventBytes": 8388608
+}

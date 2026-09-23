@@ -35,7 +35,7 @@ Every protocol binding is:
 
 | Directory                                      | Binding                          | Identifier prefix | Status  |
 | ---------------------------------------------- | -------------------------------- | ----------------- | ------- |
-| [kafka/](kafka/)                               | Kafka Protocol Binding           | `B-KFK-*`         | Drafting  |
+| [kafka/](kafka/)                               | Kafka Protocol Binding           | `B-KFK-*`         | 0.3.0-wip |
 | [websocket-asyncapi/](websocket-asyncapi/)     | WSS + AsyncAPI Protocol Binding  | `B-WSA-*`         | 0.3.0-wip |
 
 ## Layout

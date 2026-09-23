@@ -521,6 +521,12 @@ Kafka has no session, so this section describes how a client finds a stream, whe
 ### 5.1. Discovery and Startup
 
 - **B-KFK-37.** Before writing the first record to any data topic or the transaction topic, the publisher MUST write the stream descriptor and STREAM_METADATA to the control topic and MUST have both acknowledged by the cluster.
+  On every later start, before writing any other record, the publisher MUST ensure that the latest descriptor and STREAM_METADATA on the control topic are the ones in effect for this start.
+  How it does so is the publisher's choice: it MAY write both unconditionally on every start, or it MAY read the control topic to its end and write only what differs, provided the comparison guarantees that the control topic then holds exactly what it would hold after an unconditional write.
+
+*Note.* An unconditional write on every start is always compliant and needs no memory of earlier writes: both records have fixed keys on a compacted topic (B-KFK-23), so an unchanged rewrite collapses under compaction and clients treat it as no change (B-KFK-52).
+A comparison must cover the full content of both records, including `sequence_continuity`, which a restart after a failover or source change can alter ([core Section 8.4.3][core-8-4-3]), and must be made after the publisher has fenced any earlier instance (B-KFK-60), so that no other writer can change the control topic between the read and the write.
+
 - **B-KFK-38 (Client).** Before processing any record from a data topic or the transaction topic, a client MUST hold the control topic's state as of its end offset at startup: the last record for each key.
   It gets there either by reading the control topic from its beginning, or by restoring a cache of that state it persisted earlier, together with the control-topic offset the cache reflects, and reading onward from that offset to the end.
   It MUST locate the stream's topics from the descriptor it read, and MUST process STREAM_METADATA before any data event ([core Appendix A.1][core-a1]).
@@ -619,9 +625,9 @@ This revision defines Durable Mode only ([core Section 15.1][core-15-1]).
   With one in-sync replica, `acks=all` acknowledges a single broker's write, which does not meet core Section 15.1's durability obligation; unclean leader election discards acknowledged records, which is a gap no client can detect.
 - **B-KFK-47.** The publisher MUST NOT advance its source checkpoint (for example, a Kafka Connect source offset) past an event until that event's record has been acknowledged by the cluster.
   After a restart it resumes from its checkpoint and re-emits events with their original `id` values; the resulting duplicates are permitted (R-POS-5) and are resolved by `(source, id)`.
-- **B-KFK-60.** Exactly one producer instance at a time MUST write a stream's transaction topic, and each data-topic partition MUST be written by at most one producer instance at a time.
+- **B-KFK-60.** Exactly one producer instance at a time MUST write a stream's control topic and transaction topic, and each data-topic partition MUST be written by at most one producer instance at a time.
   A publisher that can run more than one instance (for example, after a failover) MUST fence the previous instance before writing, using a Kafka `transactional.id` or an equivalent mechanism.
-  Idempotence orders records from one producer session only; two writers on the transaction topic would interleave markers out of commit order.
+  Idempotence orders records from one producer session only; two writers on the transaction topic would interleave markers out of commit order, and a stale writer on the control topic could overwrite a newer descriptor or STREAM_METADATA.
 - **B-KFK-48.** The publisher MAY use Kafka transactions (for example, Kafka Connect exactly-once source support, [KIP-618][kip-618]).
   A Kafka transaction is not an OpenCDC transaction, and a client MUST NOT use Kafka transaction boundaries in place of TRX_COMMIT.
   Clients SHOULD read with `isolation.level=read_committed`.
@@ -641,11 +647,12 @@ A data partition that receives nothing for a long time is normal; a transaction 
 
 ### 5.8. Stream Reconfiguration
 
-- **B-KFK-50.** Before writing the first record to a data topic added to the stream, or the first event for a subject added to the stream, the publisher MUST write an updated descriptor to the control topic, and STREAM_METADATA updated as the core requires when `tables` changes, and MUST have both acknowledged.
+- **B-KFK-50.** Before writing any record under a changed layout (a data topic added or removed, a subject added, removed, or moved between data topics, or a changed content mode), the publisher MUST write an updated descriptor to the control topic, and STREAM_METADATA updated as the core requires when `tables` changes, and MUST have both acknowledged.
 - **B-KFK-51 (Deployment).** The partition count of a stream topic MUST NOT change while the stream exists.
   Adding partitions changes the partition of existing keys, which breaks per-row order across the change.
   Repartitioning is done by creating a new stream (new stream name, new topics) and migrating clients to it.
 - **B-KFK-52 (Client).** A client MUST keep reading the control topic while it consumes the stream, MUST subscribe to data topics added by a later descriptor starting at their beginning offsets, and MUST stop consuming the stream if a stream topic's partition count, as Kafka metadata reports it, changes while the client is consuming (B-KFK-51).
+  A client MUST treat a descriptor or STREAM_METADATA whose content is identical to the one it holds as no change.
 
 A client that reads only some tables uses the descriptor's `subjects` to choose data topics, and the transaction topic in full.
 When a TRX_COMMIT's `distribution` names a subject the client has no topic for, the descriptor it holds is stale.
@@ -966,6 +973,7 @@ Recorded so they are not lost:
 [core-6-3]: ../../spec/OpenCDC-Specification.md#63-lob-handling-obligations
 [core-4-1]: ../../spec/OpenCDC-Specification.md#41-schema-availability-guarantee
 [core-8-3]: ../../spec/OpenCDC-Specification.md#83-transaction-boundaries
+[core-8-4-3]: ../../spec/OpenCDC-Specification.md#843-canonical-discontinuity-scenarios
 [core-9]: ../../spec/OpenCDC-Specification.md#9-ddl-events
 [core-9-1]: ../../spec/OpenCDC-Specification.md#91-ddl-payload-structure
 [core-10-1]: ../../spec/OpenCDC-Specification.md#101-heartbeat

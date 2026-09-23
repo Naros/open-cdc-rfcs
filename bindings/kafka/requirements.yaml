@@ -221,8 +221,8 @@ requirements:
   level: MUST
   who: Publisher
   section: '5.1'
-  requirement: Before the first data-topic or transaction-topic record, the publisher MUST write the descriptor and STREAM_METADATA to the control topic and have
-    both acknowledged.
+  requirement: Before the first data or transaction record the publisher MUST write and have acknowledged the descriptor and STREAM_METADATA; on every later start
+    it MUST ensure they are current, by writing unconditionally or by a comparison that guarantees the same result.
 - id: B-KFK-38
   level: MUST
   who: Client
@@ -294,8 +294,8 @@ requirements:
   level: MUST
   who: Publisher
   section: '5.8'
-  requirement: Before the first record on an added data topic or for an added subject, the publisher MUST write an updated descriptor (and STREAM_METADATA as the
-    core requires) and have them acknowledged.
+  requirement: Before any record under a changed layout (topic added or removed, subject added, removed, or moved, content mode changed), the publisher MUST write
+    an updated descriptor (and STREAM_METADATA as the core requires) and have them acknowledged.
 - id: B-KFK-51
   level: MUST
   who: Deployment
@@ -305,8 +305,8 @@ requirements:
   level: MUST
   who: Client
   section: '5.8'
-  requirement: A client MUST keep reading the control topic, MUST subscribe to added data topics from their beginning offsets, and MUST stop if a stream topic's partition
-    count changes while it consumes.
+  requirement: A client MUST keep reading the control topic, MUST subscribe to added data topics from their beginning offsets, MUST stop if a stream topic's partition
+    count changes, and MUST treat an identical descriptor or STREAM_METADATA as no change.
 - id: B-KFK-53
   level: MUST
   who: Publisher and Client
@@ -353,8 +353,8 @@ requirements:
   level: MUST
   who: Publisher
   section: '5.6'
-  requirement: Exactly one producer instance at a time MUST write the transaction topic, each data partition MUST have at most one writer at a time, and a new instance
-    MUST fence the previous one (transactional.id or equivalent).
+  requirement: Exactly one producer instance at a time MUST write the control and transaction topics, each data partition MUST have at most one writer at a time,
+    and a new instance MUST fence the previous one (transactional.id or equivalent).
 - id: B-KFK-61
   level: MUST
   who: Client

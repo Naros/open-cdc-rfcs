@@ -61,6 +61,7 @@ It adds the stream-level semantics OpenCDC requires and CloudEvents does not def
 
 - 7.1. [Kafka Connect](#71-kafka-connect)
 - 7.2. [Debezium](#72-debezium)
+- 7.3. [Publishers Outside Kafka Connect](#73-publishers-outside-kafka-connect)
 
 8. [Decisions, Deferrals, and Open Items](#8-decisions-deferrals-and-open-items)
 
@@ -546,6 +547,7 @@ A single-partition profile that would preserve `ordering_scope: "stream"` end to
 
 *Note.* The producer settings in B-KFK-32, B-KFK-46, B-KFK-48, and B-KFK-60 belong to whatever creates the Kafka producer, which is not always the component that produces the events.
 In Kafka Connect the worker creates it, so a connector cannot establish these settings itself (7.1).
+A publisher outside Kafka Connect creates the producer itself and establishes them directly (7.3).
 
 *Note.* A relay does not preserve offsets.
 Committed consumer-group offsets from the source cluster are not valid on the target; a client that moves to a copy repositions by `cdcpos` and `(source, id)`, or by an offset translation the relay provides as a convenience (for example MirrorMaker 2 checkpoints).
@@ -756,7 +758,7 @@ An AsyncAPI template for this binding, analogous to the WSS + AsyncAPI binding's
 ## 7. Mapping from Existing Implementations
 
 This section is informative.
-It records how existing implementations relate to this binding, from their published documentation: 7.1 covers the Kafka Connect runtime, which many CDC connectors share, and 7.2 covers Debezium, a set of source connectors that runs on it.
+It records how existing implementations relate to this binding, from their published documentation: 7.1 covers the Kafka Connect runtime, which many CDC connectors share, 7.2 covers Debezium, a set of source connectors that runs on it, and 7.3 covers publishers that create their own Kafka producer.
 It is not an implementation plan and does not assert that any option, as documented, produces OpenCDC-conformant output.
 Rows rest on the public documentation only; a *verified* column will be added once captured records are analysed (Section 8, open item 5).
 
@@ -812,7 +814,7 @@ That subscription suits the data topics, but not the control topic.
 
 This subsection records how the configuration surface of [Debezium][debezium] source connectors, with the [Debezium CloudEvents converter][debezium-ce], relates to this binding.
 Debezium's change event envelope and its CloudEvents mapping still require the OpenCDC payload and metadata transformation the core defines.
-Runtime settings are in 7.1.
+Runtime settings are in 7.1, and for Debezium Server in 7.3.
 
 | Debezium option                                                    | Disposition                     | Note                                                                                                                           |
 | ----------------------------------------------------------------- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
@@ -858,6 +860,46 @@ Notes:
 6. Schema history topics store DDL for the connector's own recovery and are not intended for clients.
    The binding's control topic is a different artifact: it carries OBJECT_METADATA for clients, retains every version, and is required.
 7. Skipping `u` (updates) while keeping inserts and deletes yields a stream that is conformant over what it emits but is not a faithful changelog; see the WSS + AsyncAPI binding's Section 5.7 and its deferred core item 4.
+
+### 7.3. Publishers Outside Kafka Connect
+
+A publisher that does not run on Kafka Connect creates its own Kafka producer, so no worker supplies the producer settings of the 4.2 note or commits a source offset for it.
+The requirements are the same; the publisher meets each of them itself.
+The first table maps them to the Kafka producer API, from the Kafka client documentation; the second records [Debezium Server][debezium-server], a runtime for Debezium's source connectors that does not use a Connect worker.
+Other publishers are recorded once their own documentation has been reviewed (Section 8, open item 9).
+
+| Kafka producer setting, API, or publisher behavior                | Disposition                     | Note                                                                                                                           |
+| ----------------------------------------------------------------- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `acks`, `enable.idempotence`, `max.in.flight.requests.per.connection` | Fixed                       | `acks=all`, with idempotence on or one request in flight, set by the publisher on the producer it creates (B-KFK-32, B-KFK-46) (1) |
+| `send()` acknowledgement (`Future`, `Callback`)                   | Mapped with constraint          | Gates each dependent write: STREAM_METADATA before other records (B-KFK-37, B-KFK-50), OBJECT_METADATA before data naming it (B-KFK-34), a transaction's records before its TRX_COMMIT (B-KFK-43), and the source checkpoint (B-KFK-47) (2) |
+| `transactional.id`, `initTransactions()`                          | Mapped with constraint          | Fences a previous producer holding the same `transactional.id` (B-KFK-60); a stable `transactional.id` per writer, with `initTransactions()` on every start (3) |
+| `beginTransaction()`, `commitTransaction()` ([KIP-98][kip-98])    | Optional                        | Writes a transaction's records and its TRX_COMMIT in one Kafka transaction, which satisfies the visibility part of B-KFK-43 (B-KFK-48) (2) |
+| Source checkpoint                                                 | Mapped with constraint          | Advanced only after acknowledgement, or after the Kafka transaction that holds the record commits (B-KFK-47) (2)              |
+| Skipping or diverting a record on a non-retriable error           | Excluded                        | Skips or diverts records (B-KFK-53) (4)                                                                                         |
+
+Notes:
+
+1. Kafka's Java client has defaulted to `acks=all` and `enable.idempotence=true` since Kafka 3.0; a publisher sets both explicitly rather than rely on the defaults of the client it embeds.
+2. B-KFK-43 is met by one of its two paths, waiting for the transaction's acknowledgements before writing its marker or writing both in one Kafka transaction, and the producer supplies neither automatically.
+   Outside Kafka Connect nothing commits the source checkpoint inside that Kafka transaction, as exactly-once source support does for a connector's source offsets (7.1), so the publisher orders its checkpoint after the commit itself.
+3. An equivalent mechanism also satisfies B-KFK-60, but coordination above the producer, such as allowing one running instance per configuration, is equivalent only if it excludes a second live producer on the stream's topics.
+4. B-KFK-60 fences the Kafka producer, not the publisher's reader of the source database's log.
+   A publisher that stops under B-KFK-53, or is fenced, while its reader keeps running retains source log that nothing drains, and a failover that leaves two readers running doubles the load on the source.
+
+| Debezium Server setting                                           | Disposition                     | Note                                                                                                                           |
+| ----------------------------------------------------------------- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `debezium.sink.type=kafka`                                        | Mapped                          | The Debezium Server process creates the Kafka producer and runs exactly one connector (5)                                     |
+| `debezium.sink.kafka.producer.*`                                  | Mapped with constraint          | Passed to the producer with the prefix removed; the settings of B-KFK-32 and B-KFK-46 are set here, since only `bootstrap.servers`, `key.serializer`, and `value.serializer` are required |
+| `debezium.sink.kafka.wait.message.delivery.timeout.ms`            | Mapped                          | How long the server waits for each record's acknowledgement before the checkpoint advances (B-KFK-47); `0` disables the timeout (7) |
+| `debezium.format.value=cloudevents`                               | Mapped                          | The CloudEvents conversion of 7.2 (8)                                                                                          |
+| Transactional producer                                            | Add                             | Not documented; B-KFK-43 rests on the acknowledgement path (6)                                                                 |
+| Fencing of a second instance                                      | Add                             | Not documented; B-KFK-60 rests on the deployment running one instance per stream                                               |
+
+5. An application that embeds the Debezium engine and writes to Kafka itself creates the producer, and the first table applies to it.
+6. On the acknowledgement path, whether a marker sent in the same producer batch as its transaction's records can become visible to clients before the producer receives their acknowledgements is to be verified (Section 8, open item 9).
+   This does not concern the transactional path, where the broker withholds a transaction's records from `read_committed` clients until it commits.
+7. The documentation states the timeout only; that the checkpoint advances per record only once this wait completes is read from the Debezium Server Kafka sink source (`KafkaChangeConsumer`), not the published documentation, and is recorded on that basis pending verification against captured output (Section 8, open item 9).
+8. The documentation lists `cloudevents` as an output format only; that it selects the `CloudEventsConverter` of 7.2 is read from the Debezium engine source (`ConverterBuilder`), not the published documentation, and is recorded on that basis pending verification against captured output (Section 8, open item 9).
 
 ## 8. Decisions, Deferrals, and Open Items
 
@@ -951,6 +993,8 @@ Recorded so they are not lost:
 7. **Descriptor media type.** *Closed:* the descriptor was removed (8.1, decision 15).
 8. **TRUNCATE on compacted data topics.** *Closed as a documented limitation:* beyond the replay window of a multi-partition compacted topic nothing orders a TRUNCATE against the table's rows in other partitions (1.4, 3.5 note), just as nothing guarantees any transaction there (B-KFK-63); a deployment that needs correct state across a TRUNCATE avoids that configuration (B-KFK-7, 8.1 decision 16).
    A client rule comparing positions, and TRUNCATE on the transaction topic with retention for the life of the stream, were considered and not adopted; tombstoning every key of the table was rejected, because log-based capture records no row keys for a TRUNCATE.
+9. **Publishers outside Kafka Connect.** Record further publishers in 7.3, each from its own published documentation, including replication engines with their own Kafka target or handler and any that reuse Kafka Connect converters without running on a Connect worker.
+   For Debezium Server, verify against captured output (a) whether a marker sent in the same producer batch as its transaction's records can become visible before they are acknowledged (B-KFK-43), (b) that the connector's offset advances only after `wait.message.delivery.timeout.ms` completes (B-KFK-47), and (c) that `debezium.format.value=cloudevents` produces the mapping of 7.2 (7.3 notes 6 to 8).
 
 ## 9. References
 
@@ -967,7 +1011,7 @@ Recorded so they are not lost:
 - [AsyncAPI][asyncapi] AsyncAPI Specification 3.1.0
 - [AsyncAPI Kafka Bindings][asyncapi-kafka]
 - [RFC2119][rfc2119] Key words for use in RFCs to Indicate Requirement Levels
-- [Debezium][debezium] and its [CloudEvents converter][debezium-ce]
+- [Debezium][debezium], its [CloudEvents converter][debezium-ce], and [Debezium Server][debezium-server]
 - [OpenCDC Binding Conventions][formatting]
 
 [core]: https://github.com/open-cdc-hq/open-cdc-spec/blob/main/spec/OpenCDC-Specification.md
@@ -1019,3 +1063,4 @@ Recorded so they are not lost:
 [rfc2119]: https://tools.ietf.org/html/rfc2119
 [debezium]: https://debezium.io/documentation/reference/stable/
 [debezium-ce]: https://debezium.io/documentation/reference/stable/integrations/cloudevents.html
+[debezium-server]: https://debezium.io/documentation/reference/stable/operations/debezium-server.html

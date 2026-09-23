@@ -616,7 +616,9 @@ Schema versions are cached by `id`, never overwritten by table, so that a replay
 ### 5.4. Transaction Completion and the Transaction Topic
 
 - **B-KFK-43.** The publisher MUST write a transaction's TRX_COMMIT to the transaction topic after all of that transaction's events have been written to data topics and, for DDL events, the control topic, and in source commit order relative to every other TRX_COMMIT.
-  It MUST NOT let a TRX_COMMIT become visible to clients before all of the transaction's event records are acknowledged, either by waiting for their acknowledgements before sending the marker or by writing the transaction's records and its marker in one Kafka transaction (visible to `read_committed` clients only on commit).
+  It MUST NOT let a TRX_COMMIT become visible to a `read_committed` client before all of the transaction's event records are visible to it, either by waiting for their acknowledgements before sending the marker, or by writing the transaction's records and its marker from one producer instance in one or more Kafka transactions committed in produce order.
+  Only the acknowledgement path also protects a `read_uncommitted` client, which sees records as they are appended whether or not their Kafka transaction commits (B-KFK-48).
+  Kafka transactions and produce order are per producer, so a transaction whose records are written by more than one producer instance (B-KFK-60) can use only the acknowledgement path.
   Asynchronous sends to different partitions complete in any order, so writing the marker last is not by itself enough.
 - **B-KFK-61 (Client).** A client MUST NOT commit a transaction-topic offset past a TRX_COMMIT until it has finished processing that transaction.
   Offsets are committed per partition; committing the marker's offset while the transaction's data offsets are behind would lose the marker on resume, against R-POS-6 ([core Section 10.5.4][core-10-5-4]).
@@ -774,7 +776,7 @@ Several publisher requirements are therefore met, or broken, by the worker's con
 | ----------------------------------------------------------------- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
 | Worker `producer.acks`, `producer.enable.idempotence`, `producer.max.in.flight.requests.per.connection` | Fixed | `acks=all`, with idempotence on or one request in flight (B-KFK-32, B-KFK-46) (1)                                   |
 | Connector `producer.override.*`, worker `connector.client.config.override.policy` | Mapped with constraint | Per-connector producer settings must also satisfy B-KFK-32 and B-KFK-46; the worker's policy decides whether they apply (1) |
-| Worker `exactly.once.source.support`, connector `exactly.once.support` ([KIP-618][kip-618]) | Optional | Fences a previous task generation (B-KFK-60) and writes records and markers in one Kafka transaction, which satisfies the visibility part of B-KFK-43 (2) |
+| Worker `exactly.once.source.support`, connector `exactly.once.support` ([KIP-618][kip-618]) | Optional | Fences a previous task generation (B-KFK-60) and writes records and markers from the task's producer in one or more Kafka transactions committed in produce order, which satisfies the visibility part of B-KFK-43 for `read_committed` clients when one task writes all of a transaction's records and its marker (2) |
 | Connector `tasks.max`                                             | Mapped with constraint          | One writer for the transaction topic, and at most one per data partition (B-KFK-60) (3)                                        |
 | `errors.tolerance=all`, `errors.deadletterqueue.topic.name`       | Excluded                        | Skips or diverts records (B-KFK-53)                                                                                            |
 | `key.converter`                                                   | Mapped with constraint          | Its output is the record key, whose encoding must not change for the life of the stream (B-KFK-21)                             |
@@ -790,9 +792,11 @@ Notes:
    They come from the worker configuration, with the `producer.` prefix, or from the connector configuration, with the `producer.override.` prefix, where the worker's override policy permits it; the effective values are what the claim rests on.
 2. Exactly-once source support must be enabled on every worker in the cluster and supported by the connector.
    It is optional under this binding: B-KFK-43 can also be met by waiting for acknowledgements before writing a marker, and B-KFK-60 by any other fencing mechanism.
+   Only `transaction.boundary=connector`, which the connector must support, puts exactly one source transaction in each Kafka transaction; under the default `poll`, and under `interval`, a source transaction can span several Kafka transactions on one task's producer, which still meets B-KFK-43 for `read_committed` clients.
 3. A connector that runs one task per source satisfies B-KFK-60 only if a task from an earlier generation cannot still be writing after a rebalance.
    Connect fences such tasks when exactly-once source support is enabled; without it, the deployment needs another way to exclude a second writer.
    A connector that runs several tasks for one stream has several producers, and would need all markers written by one of them, or a separate stream per task.
+   The Kafka-transaction path does not hold for a transaction whose records are split across tasks (B-KFK-43).
 4. Transforms run before the converters.
    Where the OpenCDC ordinals and markers are assigned (by the connector, a transform, or the converter) decides which transforms may still filter records.
 
@@ -873,14 +877,14 @@ Other publishers are recorded once their own documentation has been reviewed (Se
 | `acks`, `enable.idempotence`, `max.in.flight.requests.per.connection` | Fixed                       | `acks=all`, with idempotence on or one request in flight, set by the publisher on the producer it creates (B-KFK-32, B-KFK-46) (1) |
 | `send()` acknowledgement (`Future`, `Callback`)                   | Mapped with constraint          | Gates each dependent write: STREAM_METADATA before other records (B-KFK-37, B-KFK-50), OBJECT_METADATA before data naming it (B-KFK-34), a transaction's records before its TRX_COMMIT (B-KFK-43), and the source checkpoint (B-KFK-47) (2) |
 | `transactional.id`, `initTransactions()`                          | Mapped with constraint          | Fences a previous producer holding the same `transactional.id` (B-KFK-60); a stable `transactional.id` per writer, with `initTransactions()` on every start (3) |
-| `beginTransaction()`, `commitTransaction()` ([KIP-98][kip-98])    | Optional                        | Writes a transaction's records and its TRX_COMMIT in one Kafka transaction, which satisfies the visibility part of B-KFK-43 (B-KFK-48) (2) |
+| `beginTransaction()`, `commitTransaction()` ([KIP-98][kip-98])    | Optional                        | Writes a transaction's records and its TRX_COMMIT in one or more Kafka transactions committed in produce order, or in exactly one if the publisher aligns its transaction boundaries with source transactions, which satisfies the visibility part of B-KFK-43 for `read_committed` clients (B-KFK-48) (2) |
 | Source checkpoint                                                 | Mapped with constraint          | Advanced only after acknowledgement, or after the Kafka transaction that holds the record commits (B-KFK-47) (2)              |
 | Skipping or diverting a record on a non-retriable error           | Excluded                        | Skips or diverts records (B-KFK-53) (4)                                                                                         |
 
 Notes:
 
 1. Kafka's Java client has defaulted to `acks=all` and `enable.idempotence=true` since Kafka 3.0; a publisher sets both explicitly rather than rely on the defaults of the client it embeds.
-2. B-KFK-43 is met by one of its two paths, waiting for the transaction's acknowledgements before writing its marker or writing both in one Kafka transaction, and the producer supplies neither automatically.
+2. B-KFK-43 is met by one of its two paths: waiting for the transaction's acknowledgements before writing its marker, which also protects a `read_uncommitted` client, or writing both from one producer in one or more Kafka transactions committed in produce order, which protects only a `read_committed` client; the producer supplies neither automatically.
    Outside Kafka Connect nothing commits the source checkpoint inside that Kafka transaction, as exactly-once source support does for a connector's source offsets (7.1), so the publisher orders its checkpoint after the commit itself.
 3. An equivalent mechanism also satisfies B-KFK-60, but coordination above the producer, such as allowing one running instance per configuration, is equivalent only if it excludes a second live producer on the stream's topics.
 4. B-KFK-60 fences the Kafka producer, not the publisher's reader of the source database's log.

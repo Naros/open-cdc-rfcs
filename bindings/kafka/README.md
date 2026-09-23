@@ -920,7 +920,7 @@ Recorded so they are not lost:
 5. **Validation against captured Debezium output** with the CloudEvents converter, to add the *verified* column to Section 7.
 6. **Kafka-compatible services.** A short note, per service, of which 1.6 capabilities it lacks (for example log compaction or record headers on some tiers).
 7. **Descriptor media type.** *Closed:* the descriptor was removed (8.1, decision 15).
-8. **TRUNCATE on compacted data topics.** Compacted state keeps rows a TRUNCATE removed (3.5 note).
+8. **TRUNCATE on compacted data topics.** Beyond the replay window of a multi-partition compacted topic, nothing orders a TRUNCATE against the table's rows in other partitions, so a sink that bootstraps from that region can restore rows the TRUNCATE removed (1.4, 3.5 note).
    Options include tombstoning every key of the table (which requires the publisher to know them), excluding TRUNCATE from compacted streams, or declaring that compacted state is not valid across a TRUNCATE.
 
 ## 9. References

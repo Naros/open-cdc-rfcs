@@ -180,12 +180,13 @@ requirements:
   who: Publisher
   section: '4.1'
   requirement: The tables declaration MUST equal the union of descriptor subjects, DML, TRUNCATE, and snapshot.READ events for a subject MUST appear only on topics
-    listing it, and reconnect coverage MUST be declared as the core requires for a sessionless producer.
+    listing it, and reconnect coverage MUST be declared as the core requires; schema_on_reconnect is realized by the control topic.
 - id: B-KFK-31
-  level: SHOULD
+  level: MUST
   who: Publisher
   section: '4.1'
-  requirement: A publisher that assigns events to topics and partitions within the producing process SHOULD declare ordering_scope channel.
+  requirement: STREAM_METADATA MUST declare ordering_scope channel; the value is fixed by claiming the binding, since a Kafka publisher always chooses partitions
+    in-process.
 - id: B-KFK-32
   level: MUST
   who: Publisher

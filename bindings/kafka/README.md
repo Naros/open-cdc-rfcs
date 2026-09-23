@@ -454,14 +454,14 @@ The publisher emits STREAM_METADATA as usual ([core Section 10.4][core-10-4]); t
 
 | STREAM_METADATA field                  | Value under this binding                        | Why                                                                                                   |
 | -------------------------------------- | ----------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| `ordering_scope`                       | Producer-declared; `"channel"` recommended      | A publisher that partitions in-process emits one sequence per partition (B-KFK-31)                   |
+| `ordering_scope`                       | `"channel"`                                     | A Kafka publisher always chooses partitions in-process, so its emission channels are the partitions (B-KFK-31) |
 | `transaction_interleaving`             | Producer-declared                               | Per-partition contiguity is preserved as emitted (B-KFK-32)                                           |
 | `session_aware`                        | `false` or absent                               | The publisher cannot observe readers (B-KFK-28)                                                       |
 | `transaction_boundaries`               | `"commit_all"`                                  | Markers are the only completion mechanism that survives partitioning (B-KFK-29)                       |
 | `transaction_marker_delivery`          | `"transaction_metadata_channel"`                | The transaction topic (B-KFK-29)                                                                      |
 | `schema_delivery.schema_on_change`     | `true`                                          | Core requirement, unchanged                                                                           |
-| `schema_delivery.schema_on_reconnect`  | Producer-declared, as the core permits          | Realized by the control topic where declared ([core Section 4.5.2][core-4-5-2]); see B-KFK-30        |
-| `schema_delivery.schema_on_each_event` | Producer-declared, as the core requires         | Required by the core when reconnect coverage cannot be declared (B-KFK-30)                            |
+| `schema_delivery.schema_on_reconnect`  | Producer-declared                               | Realized by the control topic when declared ([core Section 4.5.2][core-4-5-2]); see B-KFK-30         |
+| `schema_delivery.schema_on_each_event` | Producer-declared                               | Required by the core only when `schema_on_reconnect` is not declared (P-SCHEMA-4)                     |
 | `schema_delivery.schema_by_reference`  | Producer-declared                               | A schema registry is a supplement; `cdcschemauri` never replaces the control topic ([core Section 4.4][core-4-4]) |
 | `sequence_continuity`                  | Producer-declared                               | Describes `pos.lsn`, not Kafka offsets                                                                |
 | `transaction_visibility`               | `"committed_only"`                              | Core default                                                                                          |
@@ -472,9 +472,14 @@ The publisher emits STREAM_METADATA as usual ([core Section 10.4][core-10-4]); t
 - **B-KFK-29.** STREAM_METADATA MUST declare `transaction_boundaries: "commit_all"` and `transaction_marker_delivery: "transaction_metadata_channel"`, and the publisher MUST emit a TRX_COMMIT for every transaction, whatever `transaction_interleaving` it declares.
   This realizes P-TRX-7 as a requirement: a client of a partitioned stream cannot prove completion of any transaction, single-event or not, without a marker.
 - **B-KFK-30.** The `tables` declaration MUST equal the union of the `subjects` of the descriptor's data topics, and DML, TRUNCATE, and `snapshot.READ` events for a subject MUST appear only on data topics that list it.
-  Reconnect coverage MUST be declared as the core requires for a sessionless producer (P-SCHEMA-2, P-SCHEMA-4): where the core permits `schema_on_reconnect: true` with `session_aware: false`, the control topic is the durable control channel that realizes it; where it does not, `schema_on_each_event: true` is required.
-- **B-KFK-31.** A publisher that assigns events to topics and partitions within the producing process SHOULD declare `ordering_scope: "channel"`.
-  Its emission channels are then the partitions, the emission declaration and the delivered stream describe the same channels, and the core permits the control topic to carry reconnect coverage (Section 8, deferred core item 2).
+  Reconnect coverage MUST be declared as the core requires (P-SCHEMA-2, P-SCHEMA-4).
+  Under `ordering_scope: "channel"` the core permits `schema_on_reconnect: true` with `session_aware: false` ([core Section 4.5.2][core-4-5-2]), and the control topic is the durable control channel that realizes it; `schema_on_each_event: true` is then optional.
+- **B-KFK-31.** STREAM_METADATA MUST declare `ordering_scope: "channel"`.
+  A Kafka publisher always chooses each record's partition in its own process, whether by the default partitioner, a partition-routing transform, or a custom partitioner, so its emission channels are the partitions ([core Section 2.2a][core-2-2a]).
+  The value is fixed by claiming this binding, not configured per deployment; how the publisher partitions is governed separately, by B-KFK-21 and B-KFK-22.
+
+*Note.* Declaring `"channel"` gives up nothing a client of this binding could use: the delivered stream is ordered per partition only (4.2), whatever the emission declaration says.
+A stream on a single partition that preserves one total order would declare `"stream"`; that profile is deferred (Section 8).
 
 ### 4.2. Delivery Properties
 
@@ -818,6 +823,8 @@ None is ratified; each is a place where this draft made a call so that review ha
     Core Section 2.5 permits DDL on a channel separate from DML, subject-keyed DDL had no order against a table's other partitions anyway, and the single-partition control topic keeps each `ddl.CREATE` on one channel with its OBJECT_METADATA without copying schema onto data topics.
 12. Record keys follow row identity with a unique-key fallback, never null, in an encoding the publisher chooses and keeps (B-KFK-21), revised on 23 September 2026 after review.
     The first draft recommended a JSON-array encoding that included the table name; that would have moved every row of an existing Debezium deployment to a different partition, while no client reads the key's contents.
+13. `ordering_scope` is fixed at `"channel"` (B-KFK-31), revised on 23 September 2026 after review.
+    The first draft recommended it only for publishers that partition in-process, which on Kafka is every publisher; a conditional value would have tied the declaration to partitioner configuration.
 
 ### 8.2. Deferred Features
 
@@ -841,7 +848,8 @@ Recorded so they are not lost:
    This binding inherits the core's value (the same item as the WSS + AsyncAPI binding's deferred core item 3).
 2. **Reconnect coverage for sessionless single-sequence producers.** Core Section 6.4 lets a sessionless producer ensure schema availability "by having emitted a durable schema record in the stream" surfaced on a control channel, but Section 4.5.2 makes `schema_on_reconnect: true` with `session_aware: false` non-conformant in a single-channel stream, and P-SCHEMA-4 then forces Schema on Each Event.
    A producer that emits one sequence and publishes it to Kafka is therefore forced to embed schema in every event even though this binding supplies a retained control channel.
-   B-KFK-31 works around this by recommending `ordering_scope: "channel"` for in-process partitioning; the core could instead permit the control-channel path whenever a claimed binding realizes it.
+   This binding is not affected, because it fixes `ordering_scope: "channel"` (B-KFK-31), under which the core permits the control-channel path.
+   The inconsistency remains for sessionless single-sequence producers outside a binding, and would return for the deferred single-partition profile; the core could permit the control-channel path whenever a claimed binding realizes it.
 3. **Open or closed envelope.** Core Section 2.4 says closed-world validation never applies to the CloudEvents envelope, but the envelope schema sets `additionalProperties: false`.
    On Kafka, binary mode makes every extension attribute a `ce_` header, and existing publishers add their own.
    The core should say which rule holds.

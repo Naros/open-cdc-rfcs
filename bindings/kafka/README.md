@@ -10,7 +10,7 @@
 
 The Kafka Protocol Binding for OpenCDC defines how an OpenCDC stream is written to, and read from, Apache Kafka topics.
 It is an application of the CloudEvents Kafka protocol binding and reuses the CloudEvents JSON event format.
-It adds the stream-level semantics OpenCDC requires and CloudEvents does not define: a topic layout with a compacted control topic and an ordered transaction topic, record keying, retention rules that keep schemas and transaction markers available across the replay window, and discovery of the stream without a session.
+It adds the stream-level semantics OpenCDC requires and CloudEvents does not define: a topic layout with a compacted control topic and an ordered transaction topic, record keying, retention rules that keep schemas and transaction markers available across the replay window, and how a client obtains stream metadata without a session.
 
 ## Table of Contents
 
@@ -42,7 +42,7 @@ It adds the stream-level semantics OpenCDC requires and CloudEvents does not def
 
 5. [Delivery Protocol](#5-delivery-protocol)
 
-- 5.1. [Discovery and Startup](#51-discovery-and-startup)
+- 5.1. [Startup](#51-startup)
 - 5.2. [Start Position](#52-start-position)
 - 5.3. [Schema Resolution](#53-schema-resolution)
 - 5.4. [Transaction Completion and the Transaction Topic](#54-transaction-completion-and-the-transaction-topic)
@@ -52,11 +52,10 @@ It adds the stream-level semantics OpenCDC requires and CloudEvents does not def
 - 5.8. [Stream Reconfiguration](#58-stream-reconfiguration)
 - 5.9. [Failure Behavior](#59-failure-behavior)
 
-6. [Stream Discovery](#6-stream-discovery)
+6. [Stream Address and Client Configuration](#6-stream-address-and-client-configuration)
 
-- 6.1. [Stream Address](#61-stream-address)
-- 6.2. [Stream Descriptor](#62-stream-descriptor)
-- 6.3. [AsyncAPI Description](#63-asyncapi-description)
+- 6.1. [Client Configuration](#61-client-configuration)
+- 6.2. [AsyncAPI Description](#62-asyncapi-description)
 
 7. [Mapping from Existing Implementations](#7-mapping-from-existing-implementations)
 
@@ -125,7 +124,7 @@ Every record it defines is a CloudEvents Kafka message in the structured or bina
 Unlike the WSS + AsyncAPI binding, nothing here requires departing from the CloudEvents binding: Kafka already batches records at the protocol level, so one event per record carries no framing cost worth avoiding, and the CloudEvents Kafka binding's exclusion of the batch content mode costs nothing.
 
 Where the CloudEvents Kafka binding leaves a choice open, this binding makes it: the record key (the CloudEvents binding makes key mapping implementation-specific, [section 3.1][ce-kafka-key]), which topics a stream uses, how they are configured, and which records may appear on each.
-What it adds on top is the stream-level contract CloudEvents does not define: schema availability without a session, transaction completion across partitions, retention across the replay window, and discovery.
+What it adds on top is the stream-level contract CloudEvents does not define: schema availability without a session, transaction completion across partitions, retention across the replay window, and the topics a client must read.
 
 The envelope values of every event, including `specversion` and `cdcspecversion`, are those the core defines.
 This binding inherits them verbatim and does not restate or qualify them (see Section 8, deferred core item 1).
@@ -145,11 +144,10 @@ Binary mode is what core [Section 12][core-12] identifies as suited to Kafka: Cl
 Structured mode keeps an event self-contained in one value, which survives tools that drop or rewrite headers.
 
 - **B-KFK-1.** Each event MUST be carried in one Kafka record in either structured mode (3.2) or binary mode (3.3).
-  Every record on a stream's data topics and transaction topic MUST use the content mode declared in the stream descriptor (6.2).
-- **B-KFK-2.** Event records on the control topic MUST use structured mode, whatever mode the descriptor declares.
+  The content mode is the publisher's choice, and at any time every record it writes to a stream's data topics and transaction topic MUST use the same mode.
+- **B-KFK-2.** Records on the control topic MUST use structured mode, whatever mode the data topics use.
   The control topic is small, is read once at startup, and must remain decodable after passing through any tooling.
 - **B-KFK-3 (Client).** A client MUST support both content modes and MUST determine the mode of each event record from its `content-type` header, as the CloudEvents Kafka binding specifies ([section 3][ce-kafka-mapping]).
-  On the control topic a client MUST classify each record by its key (B-KFK-23) before applying that rule: the record keyed `opencdc:descriptor` is not a CloudEvent and is never parsed as one.
 
 ### 1.4. Channel Layout
 
@@ -168,14 +166,14 @@ The *channel* of core Terms and Definitions corresponds to a partition, not a to
 *Why compaction is admitted.* A compacted change topic doubles as a table-state source: a new sink can bootstrap from the latest record per key without a fresh snapshot, and existing CDC deployments commonly use it this way, writing delete tombstones for the purpose.
 Kafka never compacts records newer than `min.compaction.lag.ms`, and the lag bounds the replay window (B-KFK-45), so every event a client may replay is intact, exactly as on a `delete` topic.
 Only the region beyond the window changes, from nothing to table state.
-- **B-KFK-8.** The control and transaction topics SHOULD be named `<stream>.opencdc.control` and `<stream>.opencdc.transactions`, where `<stream>` is the stream name (6.2).
+- **B-KFK-8.** The control and transaction topics SHOULD be named `<stream>.opencdc.control` and `<stream>.opencdc.transactions`, where `<stream>` is a name the deployment chooses for the stream.
   Data topics MAY have any legal Kafka topic name.
-  In every case the stream descriptor, not the naming convention, is authoritative.
+  Client configuration names the topics (6.1); the convention lets an operator derive them from the stream name.
 - **B-KFK-9.** Each topic MUST carry only the records listed for its role below.
 
 | Topic role  | Partitions | `cleanup.policy` | Records                                                                  | Record key (3.4)                          |
 | ----------- | ---------- | ---------------- | ------------------------------------------------------------------------ | ----------------------------------------- |
-| Control     | 1          | `compact`        | Stream descriptor; STREAM_METADATA; durable OBJECT_METADATA; `ddl.*`     | Fixed per record kind (B-KFK-23)          |
+| Control     | 1          | `compact`        | STREAM_METADATA; durable OBJECT_METADATA; `ddl.*`                         | Fixed per record kind (B-KFK-23)          |
 | Transaction | 1          | `delete`         | TRX_COMMIT; HEARTBEAT                                                    | `cdcxid` for TRX_COMMIT; none for HEARTBEAT |
 | Data        | Fixed, 1 or more | `delete`, or compaction with a lag (B-KFK-7) | `dml.*` (including TRUNCATE), `snapshot.READ`; tombstones on compacted topics (B-KFK-62) | Row identity, or the subject (B-KFK-21)   |
 
@@ -219,7 +217,7 @@ This binding fixes the mechanism.
   Setting `ssl.endpoint.identification.algorithm` to an empty value disables host identity validation; a component so configured is not operating under this binding.
 - **B-KFK-12.** Principals MUST authenticate with mutual TLS or a SASL mechanism (`SCRAM-SHA-256`, `SCRAM-SHA-512`, `OAUTHBEARER`, or `GSSAPI`).
   SASL `PLAIN` is permitted only over TLS.
-  Credentials MUST NOT appear in record headers, record keys, topic names, or the stream descriptor; core S-AUTH-2 already forbids them in events.
+  Credentials MUST NOT appear in record headers, record keys, or topic names; core S-AUTH-2 already forbids them in events.
 - **B-KFK-13 (Deployment).** The deployment MUST NOT grant `Write` on a stream's topics, or `Write` on the publisher's `TransactionalId`, to any principal other than the publisher, or a relay writing to its own target topics.
   It MUST restrict `Alter`, `AlterConfigs`, `CreatePartitions`, and `Delete` (which permits `DeleteRecords`) on stream topics to administrators.
   A principal that can write to a data topic can inject events that clients cannot distinguish from the producer's; one that can alter a topic can undo the configuration this binding relies on (4.2, 5.5, 5.8).
@@ -258,8 +256,9 @@ Every OpenCDC binding declares the transport capabilities it relies on, so that 
   Revisions correct or extend the binding without a wire change; a wire change produces a new `<wire>`.
 - **B-KFK-15.** A publisher MUST emit only event types and attributes defined by the wire protocol version it declares in STREAM_METADATA and carries in `cdcspecversion`.
   A client that reads an event with a `cdcspecversion` it does not support MUST stop consuming the stream at that record and MUST NOT skip it.
-- **B-KFK-16 (Client).** A client MUST ignore descriptor members it does not recognise.
-  A client MUST refuse a stream whose descriptor `bindingVersion` has a `<wire>` component it does not support.
+- The binding version is not carried on the wire.
+  A stream deployment states its claim, binding version included, out of band, for example with the client configuration it publishes (6.1).
+- **B-KFK-16.** *Withdrawn.* It governed the stream descriptor, which was removed (Section 8, decision 15).
 - Unknown members of an event are governed by the core's closed-world schema rules ([core Section 2.4][core-2-4]).
 
 ## 2. Use of OpenCDC Attributes
@@ -396,7 +395,7 @@ A key built from the key columns alone, as existing CDC connectors commonly writ
 
 - **B-KFK-22.** The partition of a data-topic record MUST be a deterministic function of its key and the topic's partition count, and the function MUST NOT change for the life of the stream.
   Records with equal keys on one topic MUST be written to the same partition.
-- **B-KFK-23.** On the control topic the key MUST be `opencdc:descriptor` for the stream descriptor, `opencdc:stream-metadata` for STREAM_METADATA, `opencdc:object-metadata:` followed by the event `id` for OBJECT_METADATA, and `opencdc:ddl:` followed by the event `id` for a `ddl.*` event.
+- **B-KFK-23.** On the control topic the key MUST be `opencdc:stream-metadata` for STREAM_METADATA, `opencdc:object-metadata:` followed by the event `id` for OBJECT_METADATA, and `opencdc:ddl:` followed by the event `id` for a `ddl.*` event.
   On the transaction topic the key of a TRX_COMMIT record MUST be its `cdcxid`, and a HEARTBEAT record MUST have no key.
 - **B-KFK-24.** The event's `partitionkey` attribute, when present, is carried unchanged ([CloudEvents Kafka binding section 3.1][ce-kafka-key]).
   A publisher MUST NOT use it as the record key unless doing so satisfies B-KFK-21.
@@ -417,7 +416,7 @@ The hazard for key changes is avoided by emitting a DELETE under the old key and
 ### 3.5. Non-Event Records
 
 - **B-KFK-25.** A publisher MUST NOT write any record that is not an OpenCDC event to a data topic or the transaction topic, including records with a null value (tombstones), except as B-KFK-62 permits on compacted data topics.
-  The only non-event record on the control topic is the stream descriptor.
+  The control topic carries only events.
   A publisher MUST NOT write tombstones to the control topic.
 - **B-KFK-62.** On a data topic with compaction enabled, a publisher MAY write a tombstone after a `dml.DELETE`, and SHOULD write one for the old key after a `dml.UPDATE` that changes the primary key.
   A tombstone is a record with a null value and the key, and therefore the partition, of the row it removes (B-KFK-21, B-KFK-22).
@@ -467,12 +466,12 @@ The publisher emits STREAM_METADATA as usual ([core Section 10.4][core-10-4]); t
 | `sequence_continuity`                  | Producer-declared                               | Describes `pos.lsn`, not Kafka offsets                                                                |
 | `transaction_visibility`               | `"committed_only"`                              | Core default                                                                                          |
 | `ddl_capture`                          | Producer-declared                               | DDL events are control-topic records (B-KFK-9)                                                        |
-| `tables`                               | Every captured table of *this stream*           | Equals the union of the descriptor's data-topic `subjects` (B-KFK-30)                                 |
+| `tables`                               | Every captured table of *this stream*           | Each table's row events are on one data topic (B-KFK-30)                                              |
 
 - **B-KFK-28.** STREAM_METADATA MUST declare `session_aware: false` or omit it.
 - **B-KFK-29.** STREAM_METADATA MUST declare `transaction_boundaries: "commit_all"` and `transaction_marker_delivery: "transaction_metadata_channel"`, and the publisher MUST emit a TRX_COMMIT for every transaction, whatever `transaction_interleaving` it declares.
   This realizes P-TRX-7 as a requirement: a client of a partitioned stream cannot prove completion of any transaction, single-event or not, without a marker.
-- **B-KFK-30.** The `tables` declaration MUST equal the union of the `subjects` of the descriptor's data topics, and DML, TRUNCATE, and `snapshot.READ` events for a subject MUST appear only on data topics that list it.
+- **B-KFK-30.** The DML, TRUNCATE, and `snapshot.READ` events of a subject MUST all be written to one data topic, which MUST NOT change for the life of the stream, so that a client configured with a subject's data topic receives every row event of that subject.
   Reconnect coverage MUST be declared as the core requires (P-SCHEMA-2, P-SCHEMA-4).
   Under `ordering_scope: "channel"` the core permits `schema_on_reconnect: true` with `session_aware: false` ([core Section 4.5.2][core-4-5-2]), and the control topic is the durable control channel that realizes it; `schema_on_each_event: true` is then optional.
 - **B-KFK-31.** STREAM_METADATA MUST declare `ordering_scope: "channel"`.
@@ -492,8 +491,8 @@ A single-partition profile that would preserve `ordering_scope: "stream"` end to
 - **B-KFK-32 (Ordering preservation).** Within each partition of each topic, the publisher MUST write records in the producer's emitted order.
   The publisher MUST configure its Kafka producer so that retries cannot reorder records within a partition: `enable.idempotence=true`, or `max.in.flight.requests.per.connection=1`.
   Events written to the transaction topic are therefore in emitted order, which for TRX_COMMIT is source commit order (P-ORD-1).
-- **B-KFK-33 (Control-channel retention).** The deployment MUST keep, on the control topic, the latest stream descriptor, the latest STREAM_METADATA, every OBJECT_METADATA version, and every DDL event the publisher has written, for the life of the stream.
-  With `cleanup.policy=compact`, the keys of B-KFK-23, and no tombstones (B-KFK-25), compaction removes only superseded descriptors and superseded STREAM_METADATA.
+- **B-KFK-33 (Control-channel retention).** The deployment MUST keep, on the control topic, the latest STREAM_METADATA, every OBJECT_METADATA version, and every DDL event the publisher has written, for the life of the stream.
+  With `cleanup.policy=compact`, the keys of B-KFK-23, and no tombstones (B-KFK-25), compaction removes only superseded STREAM_METADATA.
 - **B-KFK-34 (Schema retention across the replay window).** Because the control topic never removes a schema version, every OBJECT_METADATA version that governs a retained data event remains retrievable, which realizes R-POS-7 for the whole replay window.
   In addition, the publisher MUST NOT write a record to a data topic whose `dataschema` names an OBJECT_METADATA version until that version's control-topic record has been acknowledged by the cluster.
   A client that sees a data-topic event can therefore always find its schema on the control topic (5.3).
@@ -505,7 +504,7 @@ A single-partition profile that would preserve `ordering_scope: "stream"` end to
   It MUST preserve, for every record: the partition number, the order within the partition, the key, the value, and the `content-type` and `ce_` headers.
   It MUST NOT drop, filter, merge, split, or re-key events, and MUST NOT recompute partitions from keys (partitioners differ between Kafka client libraries).
   As the one exception to preserving values and headers, a relay MAY convert the whole stream between structured and binary mode; if it does, it MUST restore each attribute to its core type (for example, `cdctxorder` from the header string `"0"` to the JSON integer `0`), which a generic CloudEvents converter does not do.
-  A relay that renames topics or converts the content mode MUST rewrite the stream descriptor accordingly; the descriptor is the only record a relay may rewrite.
+  A relay that renames topics changes the stream's address; clients of the copy are configured with the new names (6.1).
   A relay that violates this is not covered by the stream deployment's claim.
 
 *Note.* The producer settings in B-KFK-32, B-KFK-46, B-KFK-48, and B-KFK-60 belong to whatever creates the Kafka producer, which is not always the component that produces the events.
@@ -518,24 +517,24 @@ Committed consumer-group offsets from the source cluster are not valid on the ta
 
 Kafka has no session, so this section describes how a client finds a stream, where it starts, how it resolves schemas and completes transactions, and what the publisher and deployment guarantee over time.
 
-### 5.1. Discovery and Startup
+### 5.1. Startup
 
-- **B-KFK-37.** Before writing the first record to any data topic or the transaction topic, the publisher MUST write the stream descriptor and STREAM_METADATA to the control topic and MUST have both acknowledged by the cluster.
-  On every later start, before writing any other record, the publisher MUST ensure that the latest descriptor and STREAM_METADATA on the control topic are the ones in effect for this start.
-  How it does so is the publisher's choice: it MAY write both unconditionally on every start, or it MAY read the control topic to its end and write only what differs, provided the comparison guarantees that the control topic then holds exactly what it would hold after an unconditional write.
+- **B-KFK-37.** Before writing the first record to any data topic or the transaction topic, the publisher MUST write STREAM_METADATA to the control topic and MUST have it acknowledged by the cluster.
+  On every later start, before writing any other record, the publisher MUST ensure that the latest STREAM_METADATA on the control topic is the one in effect for this start.
+  How it does so is the publisher's choice: it MAY write it unconditionally on every start, or it MAY read the control topic to its end and write only what differs, provided the comparison guarantees that the control topic then holds exactly what it would hold after an unconditional write.
 
-*Note.* An unconditional write on every start is always compliant and needs no memory of earlier writes: both records have fixed keys on a compacted topic (B-KFK-23), so an unchanged rewrite collapses under compaction and clients treat it as no change (B-KFK-52).
-A comparison must cover the full content of both records, including `sequence_continuity`, which a restart after a failover or source change can alter ([core Section 8.4.3][core-8-4-3]), and must be made after the publisher has fenced any earlier instance (B-KFK-60), so that no other writer can change the control topic between the read and the write.
+*Note.* An unconditional write on every start is always compliant and needs no memory of earlier writes: STREAM_METADATA has a fixed key on a compacted topic (B-KFK-23), so an unchanged rewrite collapses under compaction and clients treat it as no change (B-KFK-52).
+A comparison must cover the full content of the record, including `sequence_continuity`, which a restart after a failover or source change can alter ([core Section 8.4.3][core-8-4-3]), and must be made after the publisher has fenced any earlier instance (B-KFK-60), so that no other writer can change the control topic between the read and the write.
 
 - **B-KFK-38 (Client).** Before processing any record from a data topic or the transaction topic, a client MUST hold the control topic's state as of its end offset at startup: the last record for each key.
   It gets there either by reading the control topic from its beginning, or by restoring a cache of that state it persisted earlier, together with the control-topic offset the cache reflects, and reading onward from that offset to the end.
-  It MUST locate the stream's topics from the descriptor it read, and MUST process STREAM_METADATA before any data event ([core Appendix A.1][core-a1]).
+  It MUST locate the stream's topics from its configuration (6.1), and MUST process STREAM_METADATA before any data event ([core Appendix A.1][core-a1]).
 
 *Note.* Keeping the last record per key, in offset order on one partition, is how this binding realizes the core's advice to keep the latest metadata revision per key ([core Appendix B.4][core-b4]).
 No revision field is needed (Section 8, deferred core item 5).
 
 *Note.* The control topic is read outside any consumer group: a client assigns its one partition directly rather than subscribing, commits no offsets for it, and positions itself at the beginning or at its cached offset.
-Every client instance reads it in full, because a consumer group would give the partition to one member and leave the others without the descriptor and schemas.
+Every client instance reads it in full, because a consumer group would give the partition to one member and leave the others without STREAM_METADATA and schemas.
 
 ### 5.2. Start Position
 
@@ -602,7 +601,7 @@ Assembly strategies, bounded waits, and subset consumption by `distribution` are
   The window belongs to the deployment, not the publisher, and a client reads it from the topic configuration (B-KFK-65).
   Records older than the window may still be present; they are outside the claim.
 
-*Note.* The window is not declared in the stream descriptor, because the publisher does not own it and a copy would drift whenever an operator changes a topic.
+*Note.* The window is not declared by the publisher, because the publisher does not own it and a declared copy would drift whenever an operator changes a topic.
 An operator that reduces retention or a compaction lag removes replayable positions; a client resuming from one meets the gap handling of B-KFK-40.
 Operators are expected to publish the window they intend to keep alongside the stream address (6.1).
 - **B-KFK-63 (Client).** On a data topic whose `cleanup.policy` includes `compact`, a client MUST treat records whose record timestamp is older than the topic's `min.compaction.lag.ms` as table state, not as a changelog.
@@ -627,7 +626,7 @@ This revision defines Durable Mode only ([core Section 15.1][core-15-1]).
   After a restart it resumes from its checkpoint and re-emits events with their original `id` values; the resulting duplicates are permitted (R-POS-5) and are resolved by `(source, id)`.
 - **B-KFK-60.** Exactly one producer instance at a time MUST write a stream's control topic and transaction topic, and each data-topic partition MUST be written by at most one producer instance at a time.
   A publisher that can run more than one instance (for example, after a failover) MUST fence the previous instance before writing, using a Kafka `transactional.id` or an equivalent mechanism.
-  Idempotence orders records from one producer session only; two writers on the transaction topic would interleave markers out of commit order, and a stale writer on the control topic could overwrite a newer descriptor or STREAM_METADATA.
+  Idempotence orders records from one producer session only; two writers on the transaction topic would interleave markers out of commit order, and a stale writer on the control topic could overwrite a newer STREAM_METADATA.
 - **B-KFK-48.** The publisher MAY use Kafka transactions (for example, Kafka Connect exactly-once source support, [KIP-618][kip-618]).
   A Kafka transaction is not an OpenCDC transaction, and a client MUST NOT use Kafka transaction boundaries in place of TRX_COMMIT.
   Clients SHOULD read with `isolation.level=read_committed`.
@@ -647,15 +646,18 @@ A data partition that receives nothing for a long time is normal; a transaction 
 
 ### 5.8. Stream Reconfiguration
 
-- **B-KFK-50.** Before writing any record under a changed layout (a data topic added or removed, a subject added, removed, or moved between data topics, or a changed content mode), the publisher MUST write an updated descriptor to the control topic, and STREAM_METADATA updated as the core requires when `tables` changes, and MUST have both acknowledged.
+- **B-KFK-50.** Before writing the first event for a subject added to the stream, the publisher MUST write STREAM_METADATA updated as the core requires when `tables` changes, and MUST have it acknowledged.
+  A new subject's data topic reaches clients through their configuration, not through the stream (B-KFK-52).
 - **B-KFK-51 (Deployment).** The partition count of a stream topic MUST NOT change while the stream exists.
   Adding partitions changes the partition of existing keys, which breaks per-row order across the change.
   Repartitioning is done by creating a new stream (new stream name, new topics) and migrating clients to it.
-- **B-KFK-52 (Client).** A client MUST keep reading the control topic while it consumes the stream, MUST subscribe to data topics added by a later descriptor starting at their beginning offsets, and MUST stop consuming the stream if a stream topic's partition count, as Kafka metadata reports it, changes while the client is consuming (B-KFK-51).
-  A client MUST treat a descriptor or STREAM_METADATA whose content is identical to the one it holds as no change.
+- **B-KFK-52 (Client).** A client MUST keep reading the control topic while it consumes the stream, and MUST stop consuming the stream if a stream topic's partition count, as Kafka metadata reports it, changes while the client is consuming (B-KFK-51).
+  When STREAM_METADATA adds a subject whose events the client processes, the client MUST read that subject's data topic from its beginning offset once it is configured with it.
+  A client MUST treat STREAM_METADATA whose content is identical to the one it holds as no change.
 
-A client that reads only some tables uses the descriptor's `subjects` to choose data topics, and the transaction topic in full.
-When a TRX_COMMIT's `distribution` names a subject the client has no topic for, the descriptor it holds is stale.
+A client that reads only some tables is configured with those tables' data topics and reads the transaction topic in full.
+When a TRX_COMMIT's `distribution` names a subject the client processes but has no topic for, its configuration is incomplete.
+A client configured with a topic pattern (for example Kafka Connect `topics.regex`) picks up a new subject's topic without reconfiguration.
 
 ### 5.9. Failure Behavior
 
@@ -666,8 +668,7 @@ Kafka reports failures as client exceptions and broker error codes; the table na
 | ---------------------------------------------------------------------- | ------------------------------------------------------------------------------ | --------- | --------------------------------------------------------------------------- |
 | Authentication failed                                                  | `SaslAuthenticationException`, `SslAuthenticationException`                    | Both      | Retry only with new credentials                                             |
 | Not authorized for a stream topic or consumer group                    | `TopicAuthorizationException`, `GroupAuthorizationException`                   | Both      | No                                                                          |
-| Control topic, or a descriptor-listed topic, does not exist            | `UNKNOWN_TOPIC_OR_PARTITION` persisting past metadata refresh                  | Client    | No; the stream address or descriptor is wrong                               |
-| Descriptor missing, invalid, or of an unsupported wire version         | (binding-level)                                                                | Client    | No (B-KFK-16)                                                               |
+| A configured stream topic does not exist                               | `UNKNOWN_TOPIC_OR_PARTITION` persisting past metadata refresh                  | Client    | No; the client configuration is wrong                                       |
 | Leader change, broker restart, network interruption                    | Retriable errors (`NOT_LEADER_OR_FOLLOWER`, `NETWORK_EXCEPTION`, timeouts)     | Both      | Yes; handled by the Kafka client                                            |
 | Consumer-group rebalance                                               | Partitions revoked and assigned                                                | Client    | Yes; resume assigned partitions from committed offsets (B-KFK-39)           |
 | Committed offset outside retained data, or expired                     | `OffsetOutOfRangeException`, `NoOffsetForPartitionException`                   | Client    | No automatic retry; surface the gap (B-KFK-40)                              |
@@ -685,70 +686,32 @@ Kafka reports failures as client exceptions and broker error codes; the table na
   Committed offsets are the client's own checkpoint, the publisher never observes them, and retention removes records whether or not any client has read them.
   A client MUST NOT treat a successful offset commit, a clean shutdown, or a rebalance as confirmation that the stream observed its progress.
 
-## 6. Stream Discovery
+## 6. Stream Address and Client Configuration
 
-A client needs two things to read a stream: where it is, and what it consists of.
-The stream address answers the first; the stream descriptor, kept on the control topic, answers the second.
+This binding defines no discovery record.
+A client reads a stream from topics it is configured with, as any Kafka consumer does, and learns everything else from the stream and from Kafka.
 
-Two kinds of statement are involved.
-**Stream declarations** (capability axes, tables, heartbeat interval, schema delivery) belong to STREAM_METADATA ([core Section 2.2a][core-2-2a], producer-sole-emitter invariant).
-**Layout declarations** (topic names and roles, which subjects each data topic carries, content mode) belong to this binding, are known to the publisher, and live in the descriptor, which is normative for the stream deployment (B-KFK-56).
-**Topic configuration** (partition counts, retention, compaction, size limits) belongs to the deployment and is not copied into the descriptor: a client reads it from Kafka, where it cannot drift from the truth (B-KFK-65).
+Three sources are involved.
+**Stream declarations** (capability axes, tables, heartbeat interval, schema delivery) belong to STREAM_METADATA on the control topic ([core Section 2.2a][core-2-2a], producer-sole-emitter invariant).
+**Client configuration** names the stream's topics: its control topic, its transaction topic, and the data topics the client reads.
+**Topic configuration** (partition counts, retention, compaction, size limits) belongs to the deployment, and a client reads it from Kafka (B-KFK-65).
+The content mode is carried on every record (B-KFK-3), and every event carries its `subject`.
 
-### 6.1. Stream Address
+### 6.1. Client Configuration
 
-- **B-KFK-55.** The address of a stream is the bootstrap servers of its Kafka cluster and the name of its control topic.
+- **B-KFK-55.** The address of a stream is the bootstrap servers of its Kafka cluster and the names of its control topic, its transaction topic, and its data topics, or a pattern that matches them.
   Whoever operates a claimed stream deployment MUST make the address available to authorized clients; how it does so (configuration, a catalog, an AsyncAPI document) is not specified.
+- **B-KFK-66 (Client).** A client MUST read the stream's control topic and transaction topic, and the data topic of every subject whose events it processes.
+  A client that processes only some subjects checks transaction completeness for those subjects with `distribution` ([core Appendix A.10][core-a10]).
 - **B-KFK-65 (Deployment).** The deployment MUST grant `Describe` and `DescribeConfigs` on every stream topic to each principal authorized to read the stream, so that a client can read partition counts, `cleanup.policy`, `retention.ms`, `min.compaction.lag.ms`, and `max.message.bytes` from Kafka.
+- **B-KFK-56.** *Withdrawn.* It governed the stream descriptor, which was removed (Section 8, decision 15).
+- **B-KFK-57.** *Withdrawn.* It governed the stream descriptor, which was removed (Section 8, decision 15).
 
-### 6.2. Stream Descriptor
-
-The descriptor is a JSON object, the value of the control-topic record with key `opencdc:descriptor`, carried with the `content-type` `application/vnd.opencdc.kafka-descriptor+json` (a proposed, unregistered media type; Section 8, open item 7).
-Its schema is published as [stream-descriptor.schema.json](stream-descriptor.schema.json), and the example below as [descriptor-example.json](descriptor-example.json).
-
-- **B-KFK-56.** The descriptor MUST validate against `stream-descriptor.schema.json` and MUST describe the stream's layout as it is: every data topic of the stream is listed, with the subjects that may appear on it.
-- **B-KFK-57.** The descriptor MUST NOT restate or contradict stream declarations.
-  STREAM_METADATA remains the authority for them; the descriptor carries only what a client needs to find and read the topics.
-  The data-topic `subjects` are a permitted derived restatement of `tables` and MUST agree with it (B-KFK-30).
-
-```json
-{
-  "binding": "kafka",
-  "bindingVersion": "0.3.0",
-  "stream": "finance-orders",
-  "contentMode": "binary",
-  "controlTopic": "finance-orders.opencdc.control",
-  "transactionTopic": "finance-orders.opencdc.transactions",
-  "dataTopics": [
-    {
-      "topic": "finance-orders.FINANCE.ORDERS",
-      "subjects": ["FINANCE.ORDERS"]
-    },
-    {
-      "topic": "finance-orders.FINANCE.ORDER_LINES",
-      "subjects": ["FINANCE.ORDER_LINES"]
-    }
-  ]
-}
-```
-
-| Member             | Required | Meaning                                                                                              |
-| ------------------ | -------- | ---------------------------------------------------------------------------------------------------- |
-| `binding`          | Yes      | `kafka`                                                                                              |
-| `bindingVersion`   | Yes      | This document's version without `-wip`; clients check the `<wire>` component (B-KFK-16)              |
-| `stream`           | Yes      | Stream name; the `<stream>` of the naming convention (B-KFK-8)                                       |
-| `contentMode`      | Yes      | `structured` or `binary`, for data and transaction topics (B-KFK-1)                                  |
-| `controlTopic`     | Yes      | Name of the topic holding this descriptor; a copy whose value differs was not rewritten by its relay (B-KFK-36) |
-| `transactionTopic` | Yes      | Name of the transaction topic                                                                        |
-| `dataTopics`       | Yes      | One entry per data topic: `topic` and the `subjects` it may carry (B-KFK-30, B-KFK-52)               |
-
-*Why the descriptor is its own record.* It could have been carried as headers on the STREAM_METADATA record ([core Appendix B.3][core-b3] allows either).
-A separate record keeps the producer's event untouched: a relay that renames topics rewrites the descriptor, never an OpenCDC event, which preserves the core's producer-sole-emitter invariant (Section 8, decision 5).
-
-### 6.3. AsyncAPI Description
+### 6.2. AsyncAPI Description
 
 - **B-KFK-58.** A stream deployment MAY additionally publish an [AsyncAPI][asyncapi] 3.x document describing its topics, using the [AsyncAPI Kafka bindings][asyncapi-kafka].
-  If it does, every `topicConfiguration` and `partitions` value in that document MUST match the deployment, and the document is informative: where it and the descriptor differ, the descriptor governs.
+  If it does, every `topicConfiguration` and `partitions` value in that document MUST match the deployment, and the document is informative.
+  It is one way to distribute the client configuration of B-KFK-55.
 
 An AsyncAPI template for this binding, analogous to the WSS + AsyncAPI binding's, is deferred (Section 8).
 
@@ -824,7 +787,7 @@ Runtime settings are in 7.1.
 | Default record key (key columns as a struct, via `key.converter`) | Carried                         | A deterministic function of row identity (B-KFK-21); the encoding must not change for the life of the stream                   |
 | Null key for a table with neither a primary nor a unique key      | Add                             | B-KFK-21 forbids a null key; key such tables by table name, or give each its own single-partition topic                        |
 | Primary key change as DELETE plus CREATE (`__debezium.newkey`, `__debezium.oldkey` headers) | Open          | Whether OpenCDC admits this representation is a core question (Section 8, deferred core item 8)                                |
-| Topic routing SMT (`ByLogicalTableRouter`)                        | Mapped with constraint          | Several subjects per data topic are allowed if listed in the descriptor; on a compacted topic `key.enforce.uniqueness=true` is required (B-KFK-21) (4) |
+| Topic routing SMT (`ByLogicalTableRouter`)                        | Mapped with constraint          | Several subjects per data topic are allowed, each on one topic only (B-KFK-30); on a compacted topic `key.enforce.uniqueness=true` is required (B-KFK-21) (4) |
 | Partition routing SMT (`PartitionRouting`)                        | Mapped with constraint          | Must be a deterministic function of row identity (B-KFK-21, B-KFK-22)                                                          |
 | `message.key.columns`                                             | Mapped with constraint          | Only immutable columns preserve per-row partitioning; mutable key columns move a row between partitions (B-KFK-21)             |
 | `tombstones.on.delete`                                            | Mapped with constraint          | `true` only on compacted data topics (B-KFK-62); `false` otherwise, since tombstones are not events (B-KFK-25)                 |
@@ -850,7 +813,7 @@ Notes:
 3. The published example shows `id` values such as `name:test_server;lsn:29274832;txId:565`: content-derived and replay-stable, but not UUID v4.
    The core requires both UUID v4 and replay stability for DML and DDL `id` values, which a random UUID meets only if it is persisted before emission (core Section 11.2).
 4. Routing several tables to one topic keeps them in one set of partitions, but a client can no longer choose tables by topic.
-   The descriptor must list every subject a topic may carry.
+   Clients then select tables by `subject` rather than by topic.
 5. Debezium's `END` record carries `event_count` and `data_collections`, which the core notes is semantically equivalent to `distribution` (core Section 10.5.3).
    The `END` record is written to the transaction topic in the Connect pipeline; whether it is written in commit order relative to other `END` records, and after its data records are acknowledged (B-KFK-43), must be verified.
 6. Schema history topics store DDL for the connector's own recovery and are not intended for clients.
@@ -871,13 +834,12 @@ None is ratified; each is a place where this draft made a call so that review ha
    A single-partition profile that preserves a total order is deferred rather than half-specified.
 3. Topic layout of one control topic, one transaction topic, and data topics (1.4); OBJECT_METADATA and DDL events only on the control topic; HEARTBEAT only on the transaction topic.
 4. Records are keyed by row identity, not by transaction, departing from the P-ORD-6 suggestion for this transport (3.4).
-5. Deployment declarations live in a stream descriptor record on the control topic rather than in headers on STREAM_METADATA (6.2).
-   The alternative is the one core Appendix B.3 mentions first; the working group should choose.
+5. *Superseded by decision 15.* Deployment declarations were carried in a stream descriptor record on the control topic rather than in headers on STREAM_METADATA.
 6. Conformance parties are Publisher, Deployment, Client, and Relay.
    The register `who` vocabulary in [binding-formatting-decisions.md][formatting] lists `Endpoint`, which fits a binding whose endpoint both emits and delivers; Kafka separates the two, so this binding uses `Publisher` and `Deployment` instead (1.1).
 7. Strict retention: `retention.bytes=-1` on data and transaction topics (B-KFK-35).
    Recorded as open item 3 in case the working group prefers a declared byte budget.
-8. An AsyncAPI document is optional (6.3).
+8. An AsyncAPI document is optional (6.2).
    Unlike the WSS + AsyncAPI binding, the description format is not part of the binding's name or purpose.
 9. Revised before first circulation after a drafting review, which found and fixed: descriptor misread as a binary-mode CloudEvent (B-KFK-2, B-KFK-3); `ddl.CREATE` forward references against core Section 9.1 (B-KFK-34, B-KFK-59); durability weaker than core Section 15.1 (B-KFK-46); no single writer for the transaction topic (B-KFK-60); marker visibility only SHOULD (B-KFK-43); markers lost by early offset commits (B-KFK-61); relay mode conversion, ACL coverage, size headroom, and HEARTBEAT wording (B-KFK-36, B-KFK-13, B-KFK-27, 5.7).
 10. Data-topic compaction is admitted, with `min.compaction.lag.ms` bounding the replay window (B-KFK-7, B-KFK-62, B-KFK-63).
@@ -888,8 +850,11 @@ None is ratified; each is a place where this draft made a call so that review ha
     The first draft recommended a JSON-array encoding that included the table name; that would have moved every row of an existing Debezium deployment to a different partition, while no client reads the key's contents.
 13. `ordering_scope` is fixed at `"channel"` (B-KFK-31), revised on 23 September 2026 after review.
     The first draft recommended it only for publishers that partition in-process, which on Kafka is every publisher; a conditional value would have tied the declaration to partitioner configuration.
-14. The descriptor carries only the layout the publisher knows (6.2); partition counts, retention, compaction, and size limits are read from Kafka (B-KFK-45, B-KFK-65), revised on 23 September 2026 after review.
+14. Partition counts, retention, compaction, and size limits are read from Kafka rather than declared by the publisher (B-KFK-45, B-KFK-65), revised on 23 September 2026 after review.
     The first draft declared `replayWindow`, `maxEventBytes`, partition counts, and a compaction flag in the descriptor, but those are set by the broker operator, which a connector usually neither controls nor can see, and a copy would drift when a topic is reconfigured.
+15. The stream descriptor is removed, and clients are configured with the stream's topics as Kafka consumers are (6.1, B-KFK-55, B-KFK-66), revised on 23 September 2026 after review.
+    Every member the descriptor carried was client configuration, carried on each record (content mode, `subject`), or topic configuration read from Kafka, and keeping a copy on the control topic was the source of repeated drift and ownership problems.
+    B-KFK-16, B-KFK-56, and B-KFK-57 are withdrawn.
 
 ### 8.2. Deferred Features
 
@@ -899,7 +864,7 @@ Not in this revision; each would be a document revision, not a wire change:
    Claiming it needs a structural guarantee that the partition count cannot change (for example, an `AlterConfigs` and `CreatePartitions` ACL policy), which this revision does not define ([core Appendix B.4][core-b4]).
 2. **Ephemeral Mode.** Requires a core-approved loss signal.
 3. **Format composition** (Avro, Protocol Buffers), including schema-registry serializers.
-4. **AsyncAPI template** with Kafka channel bindings and an `x-opencdc` extension equivalent to the descriptor.
+4. **AsyncAPI template** with Kafka channel bindings and an `x-opencdc` extension naming the stream's topic roles.
 5. **HEARTBEAT on data topics**, for per-partition liveness.
 6. **Schema and DDL pruning.** Removing OBJECT_METADATA versions and DDL events that no retained data event needs, with the tombstone rules that would allow it (R-POS-7).
 
@@ -942,7 +907,7 @@ Recorded so they are not lost:
 4. **Conformance fixtures.** Positive and negative record examples and topic configurations linked to `B-KFK-*` identifiers, in a `conformance/` directory.
 5. **Validation against captured Debezium output** with the CloudEvents converter, to add the *verified* column to Section 7.
 6. **Kafka-compatible services.** A short note, per service, of which 1.6 capabilities it lacks (for example log compaction or record headers on some tiers).
-7. **Descriptor media type.** Whether to register `application/vnd.opencdc.kafka-descriptor+json` or choose another name.
+7. **Descriptor media type.** *Closed:* the descriptor was removed (8.1, decision 15).
 8. **TRUNCATE on compacted data topics.** Compacted state keeps rows a TRUNCATE removed (3.5 note).
    Options include tombstoning every key of the table (which requires the publisher to know them), excluding TRUNCATE from compacted streams, or declaring that compacted state is not valid across a TRUNCATE.
 
@@ -990,7 +955,6 @@ Recorded so they are not lost:
 [core-a8]: ../../spec/OpenCDC-Specification.md#a8-special-events
 [core-a7]: ../../spec/OpenCDC-Specification.md#a7-step-7----replay-resume-and-sequence-continuity
 [core-a10]: ../../spec/OpenCDC-Specification.md#a10-multi-channel-transaction-completeness-trx_commit
-[core-b3]: ../../spec/OpenCDC-Specification.md#b3-transport-specific-implementation-notes
 [core-b4]: ../../spec/OpenCDC-Specification.md#b4-kafka-consumption-guidance-informative
 [formatting]: ../binding-formatting-decisions.md
 [ce]: https://github.com/cloudevents/spec/blob/main/cloudevents/spec.md

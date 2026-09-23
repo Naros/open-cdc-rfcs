@@ -1,11 +1,9 @@
 Validation record for the Kafka binding, 2026-09-23
 - Core spec: open-cdc-spec main at d370c65 (spec v0.7.0, wire 0.3)
-- stream-descriptor.schema.json: valid JSON Schema 2020-12 (jsonschema 4.23);
-  descriptor-example.json validates; a descriptor with contentMode "batch" is rejected.
 - Quality gates: bindings/tools/check_binding.py adapted for this binding
-  (B-KFK prefix; descriptor example and schema in place of the AsyncAPI
-  template and x-opencdc schema; G11 checks that every cited B-KFK id is
-  defined, in place of the close-code table). 18/19 pass; G13 (wrap at 80)
+  (B-KFK prefix; the AsyncAPI template, x-opencdc schema, and close-code
+  gates do not apply and are dropped; G11 checks that every cited B-KFK id
+  is defined). 14/15 pass; G13 (wrap at 80)
   fails by design, since this document uses one sentence per line, which
   conflicts with binding-formatting-decisions.md section 6.
   The adapted tool is not committed; see README Section 8, open item 1.

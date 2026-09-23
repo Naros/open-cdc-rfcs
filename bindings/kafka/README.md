@@ -163,9 +163,21 @@ The *channel* of core Terms and Definitions corresponds to a partition, not a to
   On a data topic with compaction enabled, the deployment MUST set `min.compaction.lag.ms` explicitly; its default of 0 would give the stream a replay window of zero (B-KFK-45).
   Records older than a compacted topic's lag are table state, the latest record per key, rather than an OpenCDC changelog (B-KFK-63).
 
-*Why compaction is admitted.* A compacted change topic doubles as a table-state source: a new sink can bootstrap from the latest record per key without a fresh snapshot, and existing CDC deployments commonly use it this way, writing delete tombstones for the purpose.
-Kafka never compacts records newer than `min.compaction.lag.ms`, and the lag bounds the replay window (B-KFK-45), so every event a client may replay is intact, exactly as on a `delete` topic.
-Only the region beyond the window changes, from nothing to table state.
+*Why compaction is admitted.* Compaction on a data topic is a broker storage optimization: once a later record for a key supersedes an earlier one, the broker need not keep the earlier one.
+Kafka never compacts a record newer than the topic's `min.compaction.lag.ms`, and that lag bounds the replay window (B-KFK-45), so every event a client reads within the window is intact and in order, exactly as on a `delete` topic.
+Beyond the window, each partition keeps at least the latest record per key, and possibly no other, and B-KFK-63 applies.
+
+That retained state is not a substitute for a snapshot, and a reader that takes it as current table state is right only in part:
+
+- A DELETE remains the latest record for its key, so a reader that inspects the event sees the row as removed.
+  A reader that treats any non-null value as a present row sees the removal only if the publisher wrote a tombstone (B-KFK-62), and only if its scan reaches the tombstone within `delete.retention.ms` of the tombstone becoming eligible for removal.
+- After a primary-key change, the old key keeps its last record unless the publisher wrote a tombstone for it (B-KFK-62).
+- A TRUNCATE is keyed by its subject (B-KFK-21) and removes no row key.
+  Replayed in offset order on a single-partition topic it still takes effect correctly; on a multi-partition topic, beyond the window, nothing orders it against the table's rows in other partitions.
+
+Many CDC deployments write delete tombstones so that a compacted topic can seed a new sink.
+Whether that is adequate for a given sink is a deployment decision; a sink that needs accurate table state takes a fresh snapshot.
+
 - **B-KFK-8.** The control and transaction topics SHOULD be named `<stream>.opencdc.control` and `<stream>.opencdc.transactions`, where `<stream>` is a name the deployment chooses for the stream.
   Data topics MAY have any legal Kafka topic name.
   Client configuration names the topics (6.1); the convention lets an operator derive them from the stream name.
@@ -428,7 +440,7 @@ The hazard for key changes is avoided by emitting a DELETE under the old key and
 
 *Note.* An OpenCDC DELETE carries its before image, so it is never itself a tombstone and does not remove its key under compaction; the tombstone is what lets compaction eventually drop a deleted row.
 Without the tombstone for the old key, a primary-key change leaves the row's previous record under that key, and a sink that bootstraps from the compacted region restores a row that no longer exists.
-A TRUNCATE is keyed by its subject (B-KFK-21), so compaction keeps it alongside every earlier row of the table under their own keys, and a bootstrapping sink restores rows the TRUNCATE removed.
+A TRUNCATE is keyed by its subject (B-KFK-21), so compaction keeps it alongside every earlier row of the table under their own keys; on a multi-partition topic, beyond the window, nothing orders it against those rows, and a bootstrapping sink can restore rows the TRUNCATE removed.
 This revision does not fix the TRUNCATE case (Section 8, open item 8).
 
 ### 3.6. Size Limits

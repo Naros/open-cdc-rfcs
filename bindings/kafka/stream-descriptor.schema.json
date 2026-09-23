@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://opencdc.org/schemas/bindings/kafka/stream-descriptor.schema.json",
   "title": "Stream descriptor for the Kafka Protocol Binding (0.3.0)",
-  "description": "Deployment declarations for an OpenCDC stream on Kafka, carried as the value of the control-topic record keyed opencdc:descriptor (Section 6.2). Normative for the stream deployment. They are not stream declarations; those live in STREAM_METADATA. Clients MUST ignore members they do not recognise (B-KFK-16).",
+  "description": "Layout declarations for an OpenCDC stream on Kafka, carried as the value of the control-topic record keyed opencdc:descriptor (Section 6.2). Normative for the stream deployment. They are not stream declarations; those live in STREAM_METADATA. Clients MUST ignore members they do not recognise (B-KFK-16).",
   "type": "object",
   "required": [
     "binding",
@@ -11,9 +11,7 @@
     "contentMode",
     "controlTopic",
     "transactionTopic",
-    "dataTopics",
-    "replayWindow",
-    "maxEventBytes"
+    "dataTopics"
   ],
   "properties": {
     "binding": {
@@ -49,17 +47,11 @@
         "type": "object",
         "required": [
           "topic",
-          "partitions",
           "subjects"
         ],
         "properties": {
           "topic": {
             "$ref": "#/$defs/topicName"
-          },
-          "partitions": {
-            "type": "integer",
-            "minimum": 1,
-            "description": "Current partition count; fixed for the life of the stream (B-KFK-51)."
           },
           "subjects": {
             "type": "array",
@@ -70,32 +62,10 @@
               "minLength": 1
             },
             "description": "Subjects whose events may appear on this topic (B-KFK-30)."
-          },
-          "compacted": {
-            "type": "boolean",
-            "default": false,
-            "description": "True when the topic has compaction enabled; min.compaction.lag.ms is then at least replayWindow, and records older than replayWindow are table state (B-KFK-7, B-KFK-63)."
           }
         },
         "additionalProperties": true
       }
-    },
-    "replayWindow": {
-      "type": "string",
-      "description": "ISO 8601 duration no longer than the smallest data-topic retention.ms, or 'unbounded' (B-KFK-45).",
-      "anyOf": [
-        {
-          "pattern": "^P(?!$)(\\d+Y)?(\\d+M)?(\\d+W)?(\\d+D)?(T(?=\\d)(\\d+H)?(\\d+M)?(\\d+S)?)?$"
-        },
-        {
-          "const": "unbounded"
-        }
-      ]
-    },
-    "maxEventBytes": {
-      "type": "integer",
-      "minimum": 1,
-      "description": "Largest record value the stream admits, UTF-8 bytes before compression (B-KFK-27)."
     }
   },
   "additionalProperties": true,

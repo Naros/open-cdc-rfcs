@@ -8,15 +8,11 @@
   "dataTopics": [
     {
       "topic": "finance-orders.FINANCE.ORDERS",
-      "partitions": 6,
       "subjects": ["FINANCE.ORDERS"]
     },
     {
       "topic": "finance-orders.FINANCE.ORDER_LINES",
-      "partitions": 6,
       "subjects": ["FINANCE.ORDER_LINES"]
     }
-  ],
-  "replayWindow": "P7D",
-  "maxEventBytes": 8388608
+  ]
 }

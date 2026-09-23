@@ -162,12 +162,11 @@ The *channel* of core Terms and Definitions corresponds to a partition, not a to
   The value `compact,delete` does not satisfy this rule, because time-based deletion would remove schema versions (4.2).
 - **B-KFK-6 (Deployment).** The transaction topic MUST have exactly one partition and a `cleanup.policy` of `delete`.
 - **B-KFK-7 (Deployment).** Every data topic MUST have a `cleanup.policy` of `delete`, `compact`, or `compact,delete`.
-  On a data topic with compaction enabled, `min.compaction.lag.ms` MUST be at least the declared `replayWindow` (B-KFK-45), so that no event inside the replay window is ever compacted, and the topic's descriptor entry MUST declare `"compacted": true` (6.2).
-  A stream with a compacted data topic MUST NOT declare an `unbounded` replay window.
-  Beyond the replay window a compacted data topic holds table state, the latest record per key, rather than an OpenCDC changelog (B-KFK-63).
+  On a data topic with compaction enabled, the deployment MUST set `min.compaction.lag.ms` explicitly; its default of 0 would give the stream a replay window of zero (B-KFK-45).
+  Records older than a compacted topic's lag are table state, the latest record per key, rather than an OpenCDC changelog (B-KFK-63).
 
 *Why compaction is admitted.* A compacted change topic doubles as a table-state source: a new sink can bootstrap from the latest record per key without a fresh snapshot, and existing CDC deployments commonly use it this way, writing delete tombstones for the purpose.
-Kafka never compacts records newer than `min.compaction.lag.ms`, so with the lag at least the replay window, every event a client may replay is intact, exactly as on a `delete` topic.
+Kafka never compacts records newer than `min.compaction.lag.ms`, and the lag bounds the replay window (B-KFK-45), so every event a client may replay is intact, exactly as on a `delete` topic.
 Only the region beyond the window changes, from nothing to table state.
 - **B-KFK-8.** The control and transaction topics SHOULD be named `<stream>.opencdc.control` and `<stream>.opencdc.transactions`, where `<stream>` is the stream name (6.2).
   Data topics MAY have any legal Kafka topic name.
@@ -207,7 +206,7 @@ Topic: finance-orders.FINANCE.ORDER_LINES  PartitionCount: 6  RF: 3
 ```
 
 The transaction topic's `retention.ms` (8 days) exceeds the data topics' `retention.ms` plus `segment.ms` (7 days plus 1 day) by more than the retention check interval, as B-KFK-35 requires.
-`max.message.bytes` (8.25 MiB) leaves 256 KiB above the descriptor's `maxEventBytes` (8 MiB) for keys, headers, and batch overhead (B-KFK-27).
+`max.message.bytes` (8.25 MiB) is set on every stream topic, the control topic included, so an event up to about 8 MiB fits with room for its key, headers, and batch overhead (B-KFK-27).
 
 ### 1.5. Security
 
@@ -437,13 +436,12 @@ This revision does not fix the TRUNCATE case (Section 8, open item 8).
 
 - **B-KFK-26.** This binding defines no application-level chunking or truncation of events.
   Truncating LOB values, DDL text, or records to a size ceiling is a payload change governed by the core ([Section 6.2][core-6-2], [Section 6.3][core-6-3], [Section 9][core-9]); a publisher that truncates is not emitting the core's events and MUST NOT claim this binding for that stream.
-- **B-KFK-27 (Publisher and Deployment).** The descriptor MUST declare `maxEventBytes`, the largest serialized record value the stream admits in UTF-8 bytes before compression.
-  The deployment MUST configure broker `message.max.bytes`, topic `max.message.bytes` on every stream topic, the control topic included, and the publisher MUST configure `max.request.size`, so that a record whose value is at most `maxEventBytes` is accepted.
-  These limits apply to the whole record batch, including key, headers (every attribute, in binary mode), and batch overhead, so they MUST exceed `maxEventBytes` by enough to cover them.
-  An event larger than `maxEventBytes`, or a record the broker rejects as too large, is a configuration error: the publisher MUST stop publishing the stream and MUST NOT truncate, drop, skip, or divert the event (for example to a dead-letter topic).
+- **B-KFK-27 (Publisher and Deployment).** The largest event a stream admits is set by the deployment's broker `message.max.bytes` and topic `max.message.bytes`, which the deployment MUST set on every stream topic, the control topic included, and by the publisher's `max.request.size`, which MUST be at least the topic limit.
+  These limits apply to the whole record batch, including key, headers (every attribute, in binary mode), and batch overhead, not to the event alone.
+  A record the producer or broker rejects as too large is a configuration error: the publisher MUST stop publishing the stream and MUST NOT truncate, drop, skip, or divert the event (for example to a dead-letter topic).
 
 *Note.* Kafka clients return a record batch larger than `fetch.max.bytes` or `max.partition.fetch.bytes` rather than stalling, so a client needs no fetch configuration to make progress past a large event.
-It does need memory for `maxEventBytes`.
+It does need memory for the largest record the topics accept, which it can read from their `max.message.bytes` (B-KFK-65).
 
 ## 4. Stream Profile and Delivery Properties
 
@@ -532,6 +530,7 @@ No revision field is needed (Section 8, deferred core item 5).
 
 *Note.* The control topic is read outside any consumer group: a client assigns its one partition directly rather than subscribing, commits no offsets for it, and positions itself at the beginning or at its cached offset.
 Every client instance reads it in full, because a consumer group would give the partition to one member and leave the others without the descriptor and schemas.
+
 ### 5.2. Start Position
 
 A client chooses its own start position; the publisher is not involved (R-POS-2-MC).
@@ -592,18 +591,23 @@ Assembly strategies, bounded waits, and subset consumption by `distribution` are
 
 ### 5.5. Replay Window and Retention
 
-- **B-KFK-45 (Publisher and Deployment).** The descriptor MUST declare `replayWindow`: an ISO 8601 duration no longer than any data topic's `retention.ms` (where it deletes by time) or `min.compaction.lag.ms` (where it compacts), or `unbounded` when every data topic has `cleanup.policy=delete` and `retention.ms=-1`.
-  The deployment MUST NOT reduce retention or the compaction lag below the declared window.
-  Records older than the declared window may still be present; they are outside the claim.
-- **B-KFK-63 (Client).** On a data topic whose descriptor entry declares `"compacted": true`, a client MUST treat records whose record timestamp is older than the declared `replayWindow` as table state, not as a changelog.
+- **B-KFK-45 (Deployment).** A stream's replay window is set by its data topics' configuration: it is the smallest, over the data topics, of `retention.ms` for a topic whose `cleanup.policy` is `delete`, and of `min.compaction.lag.ms` (or `retention.ms`, if smaller and the policy also includes `delete`) for a topic with compaction enabled.
+  It is unbounded when every data topic has `cleanup.policy=delete` and `retention.ms=-1`.
+  The window belongs to the deployment, not the publisher, and a client reads it from the topic configuration (B-KFK-65).
+  Records older than the window may still be present; they are outside the claim.
+
+*Note.* The window is not declared in the stream descriptor, because the publisher does not own it and a copy would drift whenever an operator changes a topic.
+An operator that reduces retention or a compaction lag removes replayable positions; a client resuming from one meets the gap handling of B-KFK-40.
+Operators are expected to publish the window they intend to keep alongside the stream address (6.1).
+- **B-KFK-63 (Client).** On a data topic whose `cleanup.policy` includes `compact`, a client MUST treat records whose record timestamp is older than the topic's `min.compaction.lag.ms` as table state, not as a changelog.
   It MUST NOT expect transactions among those records to be complete or their TRX_COMMIT markers to be available, and MUST expect `cdctxorder` gaps among them.
-  Records inside the window are an unaltered changelog, as on any other data topic.
+  Records inside the lag are an unaltered changelog, as on any other data topic.
 
 *Note.* B-KFK-63 relies on record timestamps being publish times (B-KFK-41).
-A client that bootstraps from compacted state and then continues into the changelog crosses from state to events at the window boundary; how it reconciles the two is consumer guidance, comparable to the snapshot-to-steady-state transition ([core Appendix A.8][core-a8]).
+A client that bootstraps from compacted state and then continues into the changelog crosses from state to events at the lag boundary; how it reconciles the two is consumer guidance, comparable to the snapshot-to-steady-state transition ([core Appendix A.8][core-a8]).
 
 *Note.* Size-based retention (`retention.bytes`) is excluded by B-KFK-35, because a window measured in bytes cannot be compared across topics of different volume.
-A size limit also deletes a partition's oldest segments whenever it grows past the limit, so a burst of changes can remove records younger than the declared replay window.
+A size limit also deletes a partition's oldest segments whenever it grows past the limit, so a burst of changes can remove records younger than the replay window.
 Tiered storage ([KIP-405][kip-405]) changes where segments live, not when they are deleted, and is compatible with this binding.
 
 ### 5.6. Publishing Durability
@@ -641,7 +645,7 @@ A data partition that receives nothing for a long time is normal; a transaction 
 - **B-KFK-51 (Deployment).** The partition count of a stream topic MUST NOT change while the stream exists.
   Adding partitions changes the partition of existing keys, which breaks per-row order across the change.
   Repartitioning is done by creating a new stream (new stream name, new topics) and migrating clients to it.
-- **B-KFK-52 (Client).** A client MUST keep reading the control topic while it consumes the stream, MUST subscribe to data topics added by a later descriptor starting at their beginning offsets, and MUST stop consuming the stream if the partition count a topic reports differs from the count in the descriptor.
+- **B-KFK-52 (Client).** A client MUST keep reading the control topic while it consumes the stream, MUST subscribe to data topics added by a later descriptor starting at their beginning offsets, and MUST stop consuming the stream if a stream topic's partition count, as Kafka metadata reports it, changes while the client is consuming (B-KFK-51).
 
 A client that reads only some tables uses the descriptor's `subjects` to choose data topics, and the transaction topic in full.
 When a TRX_COMMIT's `distribution` names a subject the client has no topic for, the descriptor it holds is stale.
@@ -661,7 +665,7 @@ Kafka reports failures as client exceptions and broker error codes; the table na
 | Consumer-group rebalance                                               | Partitions revoked and assigned                                                | Client    | Yes; resume assigned partitions from committed offsets (B-KFK-39)           |
 | Committed offset outside retained data, or expired                     | `OffsetOutOfRangeException`, `NoOffsetForPartitionException`                   | Client    | No automatic retry; surface the gap (B-KFK-40)                              |
 | Record not decodable, or of an unsupported `cdcspecversion`            | `RecordDeserializationException`, or binding-level                             | Client    | No; stop at the record (B-KFK-15, B-KFK-53)                                 |
-| Partition count differs from the descriptor                            | Metadata                                                                       | Client    | No; stop (B-KFK-52)                                                         |
+| Partition count of a stream topic changes                              | Metadata                                                                       | Client    | No; stop (B-KFK-52)                                                         |
 | Marker missing past the bounded wait                                   | (binding-level)                                                                | Client    | Alert; consumer guidance ([core Appendix A.10][core-a10])                   |
 | Event larger than the stream admits                                    | `RecordTooLargeException`, `MESSAGE_TOO_LARGE`                                 | Publisher | No; stop publishing until the operator acts (B-KFK-27)                      |
 | Another publisher instance took over                                   | `ProducerFencedException`, `InvalidProducerEpochException`                     | Publisher | No; this instance stops                                                     |
@@ -681,20 +685,21 @@ The stream address answers the first; the stream descriptor, kept on the control
 
 Two kinds of statement are involved.
 **Stream declarations** (capability axes, tables, heartbeat interval, schema delivery) belong to STREAM_METADATA ([core Section 2.2a][core-2-2a], producer-sole-emitter invariant).
-**Deployment declarations** (topic names, partition counts, content mode, replay window, size limit) belong to this binding and live in the descriptor.
-The descriptor is normative for the stream deployment (B-KFK-56).
+**Layout declarations** (topic names and roles, which subjects each data topic carries, content mode) belong to this binding, are known to the publisher, and live in the descriptor, which is normative for the stream deployment (B-KFK-56).
+**Topic configuration** (partition counts, retention, compaction, size limits) belongs to the deployment and is not copied into the descriptor: a client reads it from Kafka, where it cannot drift from the truth (B-KFK-65).
 
 ### 6.1. Stream Address
 
 - **B-KFK-55.** The address of a stream is the bootstrap servers of its Kafka cluster and the name of its control topic.
   Whoever operates a claimed stream deployment MUST make the address available to authorized clients; how it does so (configuration, a catalog, an AsyncAPI document) is not specified.
+- **B-KFK-65 (Deployment).** The deployment MUST grant `Describe` and `DescribeConfigs` on every stream topic to each principal authorized to read the stream, so that a client can read partition counts, `cleanup.policy`, `retention.ms`, `min.compaction.lag.ms`, and `max.message.bytes` from Kafka.
 
 ### 6.2. Stream Descriptor
 
 The descriptor is a JSON object, the value of the control-topic record with key `opencdc:descriptor`, carried with the `content-type` `application/vnd.opencdc.kafka-descriptor+json` (a proposed, unregistered media type; Section 8, open item 7).
 Its schema is published as [stream-descriptor.schema.json](stream-descriptor.schema.json), and the example below as [descriptor-example.json](descriptor-example.json).
 
-- **B-KFK-56.** The descriptor MUST validate against `stream-descriptor.schema.json` and MUST describe the deployment as it is: every data topic of the stream is listed, with its current partition count and the subjects that may appear on it.
+- **B-KFK-56.** The descriptor MUST validate against `stream-descriptor.schema.json` and MUST describe the stream's layout as it is: every data topic of the stream is listed, with the subjects that may appear on it.
 - **B-KFK-57.** The descriptor MUST NOT restate or contradict stream declarations.
   STREAM_METADATA remains the authority for them; the descriptor carries only what a client needs to find and read the topics.
   The data-topic `subjects` are a permitted derived restatement of `tables` and MUST agree with it (B-KFK-30).
@@ -710,17 +715,13 @@ Its schema is published as [stream-descriptor.schema.json](stream-descriptor.sch
   "dataTopics": [
     {
       "topic": "finance-orders.FINANCE.ORDERS",
-      "partitions": 6,
       "subjects": ["FINANCE.ORDERS"]
     },
     {
       "topic": "finance-orders.FINANCE.ORDER_LINES",
-      "partitions": 6,
       "subjects": ["FINANCE.ORDER_LINES"]
     }
-  ],
-  "replayWindow": "P7D",
-  "maxEventBytes": 8388608
+  ]
 }
 ```
 
@@ -732,9 +733,7 @@ Its schema is published as [stream-descriptor.schema.json](stream-descriptor.sch
 | `contentMode`      | Yes      | `structured` or `binary`, for data and transaction topics (B-KFK-1)                                  |
 | `controlTopic`     | Yes      | Name of the topic holding this descriptor; a copy whose value differs was not rewritten by its relay (B-KFK-36) |
 | `transactionTopic` | Yes      | Name of the transaction topic                                                                        |
-| `dataTopics`       | Yes      | One entry per data topic: `topic`, `partitions`, `subjects` (B-KFK-30, B-KFK-52), and `compacted` (optional, default `false`; B-KFK-7) |
-| `replayWindow`     | Yes      | ISO 8601 duration or `unbounded` (B-KFK-45)                                                          |
-| `maxEventBytes`    | Yes      | Largest record value admitted, UTF-8 bytes before compression (B-KFK-27)                             |
+| `dataTopics`       | Yes      | One entry per data topic: `topic` and the `subjects` it may carry (B-KFK-30, B-KFK-52)               |
 
 *Why the descriptor is its own record.* It could have been carried as headers on the STREAM_METADATA record ([core Appendix B.3][core-b3] allows either).
 A separate record keeps the producer's event untouched: a relay that renames topics rewrites the descriptor, never an OpenCDC event, which preserves the core's producer-sole-emitter invariant (Section 8, decision 5).
@@ -874,7 +873,7 @@ None is ratified; each is a place where this draft made a call so that review ha
 8. An AsyncAPI document is optional (6.3).
    Unlike the WSS + AsyncAPI binding, the description format is not part of the binding's name or purpose.
 9. Revised before first circulation after a drafting review, which found and fixed: descriptor misread as a binary-mode CloudEvent (B-KFK-2, B-KFK-3); `ddl.CREATE` forward references against core Section 9.1 (B-KFK-34, B-KFK-59); durability weaker than core Section 15.1 (B-KFK-46); no single writer for the transaction topic (B-KFK-60); marker visibility only SHOULD (B-KFK-43); markers lost by early offset commits (B-KFK-61); relay mode conversion, ACL coverage, size headroom, and HEARTBEAT wording (B-KFK-36, B-KFK-13, B-KFK-27, 5.7).
-10. Data-topic compaction is admitted, with `min.compaction.lag.ms` at least the replay window (B-KFK-7, B-KFK-62, B-KFK-63).
+10. Data-topic compaction is admitted, with `min.compaction.lag.ms` bounding the replay window (B-KFK-7, B-KFK-62, B-KFK-63).
     The first draft forbade it outright; that was revised on 23 September 2026 after review, because compacted change topics are common practice as table-state sources and compaction beyond the window does not affect any replayable event.
 11. DDL events are carried on the control topic, not on data topics (B-KFK-9, B-KFK-59, B-KFK-64), revised on 23 September 2026 after review.
     Core Section 2.5 permits DDL on a channel separate from DML, subject-keyed DDL had no order against a table's other partitions anyway, and the single-partition control topic keeps each `ddl.CREATE` on one channel with its OBJECT_METADATA without copying schema onto data topics.
@@ -882,6 +881,8 @@ None is ratified; each is a place where this draft made a call so that review ha
     The first draft recommended a JSON-array encoding that included the table name; that would have moved every row of an existing Debezium deployment to a different partition, while no client reads the key's contents.
 13. `ordering_scope` is fixed at `"channel"` (B-KFK-31), revised on 23 September 2026 after review.
     The first draft recommended it only for publishers that partition in-process, which on Kafka is every publisher; a conditional value would have tied the declaration to partitioner configuration.
+14. The descriptor carries only the layout the publisher knows (6.2); partition counts, retention, compaction, and size limits are read from Kafka (B-KFK-45, B-KFK-65), revised on 23 September 2026 after review.
+    The first draft declared `replayWindow`, `maxEventBytes`, partition counts, and a compaction flag in the descriptor, but those are set by the broker operator, which a connector usually neither controls nor can see, and a copy would drift when a topic is reconfigured.
 
 ### 8.2. Deferred Features
 
@@ -921,6 +922,9 @@ Recorded so they are not lost:
 8. **Primary key changes.** The core does not say how an UPDATE that changes a row's primary key is represented.
    Debezium emits a DELETE for the old key and a CREATE for the new one, which on Kafka keeps each key's history in one partition and lets compaction clear the old key; this binding assumes a single UPDATE keyed by the new key (3.4 note, B-KFK-62).
    The core should say whether the DELETE and INSERT pair is conformant and, if so, how the two events are correlated.
+9. **Replay window.** The core uses "replay window" normatively (R-POS-6, R-POS-7, P-RET-1, Sections 12 and 15.1, Appendix B.3) but does not define it, and attributes it two ways: R-POS-7 speaks of "the replay window the producer supports", while Section 15.1 and Appendix B.3 speak of "the deployment's supported replay window".
+   On Kafka the window is set by topic retention, which the broker operator owns, so this binding treats it as a deployment property (B-KFK-45).
+   The core should define the term and assign it to one party.
 
 ### 8.4. Open Items
 

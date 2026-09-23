@@ -300,7 +300,7 @@ Structured mode, an INSERT on `FINANCE.ORDERS` (value abridged):
 Topic Name: finance-orders.FINANCE.ORDERS
 Partition:  4
 ------------------- key ----------------------
-["FINANCE.ORDERS",1001]
+{"ORDER_ID":1001}
 ------------------ headers -------------------
 content-type: application/cloudevents+json; charset=UTF-8
 ------------------- value --------------------
@@ -343,7 +343,7 @@ The same INSERT in binary mode:
 Topic Name: finance-orders.FINANCE.ORDERS
 Partition:  4
 ------------------- key ----------------------
-["FINANCE.ORDERS",1001]
+{"ORDER_ID":1001}
 ------------------ headers -------------------
 ce_specversion: 1.1
 ce_id: 7f3a2b10-e14c-4d8a-9f62-3c1d8e4b5a09
@@ -374,16 +374,23 @@ content-type: application/json
 The record key decides the partition, and the partition is the only unit in which Kafka preserves order.
 The rules below keep every change to one row in one partition, which is what per-row order depends on.
 
-- **B-KFK-21.** The key of a data-topic record MUST be a deterministic function of the event's `subject` and, for row events of a table with a primary key, of that row's primary key values:
+- **B-KFK-21.** The key of a data-topic record MUST be a deterministic function of the row identity of the event it carries, and MUST NOT be null.
+  Row identity is:
 
-| Event                                                          | Key derived from                                    |
+| Event                                                          | Row identity                                        |
 | -------------------------------------------------------------- | --------------------------------------------------- |
-| `dml.INSERT`, `dml.UPDATE`, `dml.UPSERT`, `snapshot.READ`      | `subject` and the primary key values of `after`     |
-| `dml.DELETE`                                                   | `subject` and the primary key values of `before`    |
-| `dml.TRUNCATE`                                                 | `subject` only                                      |
-| Any row event of a table with an empty `primary_key`           | `subject` only                                      |
+| `dml.INSERT`, `dml.UPDATE`, `dml.UPSERT`, `snapshot.READ`      | The key values of `after`                           |
+| `dml.DELETE`                                                   | The key values of `before`                          |
+| `dml.TRUNCATE`                                                 | The `subject`                                       |
 
-  The key SHOULD be the UTF-8 JSON text of an array whose first element is the `subject` and whose remaining elements are the primary key values in `primary_key` order, in their wire encoding, with no insignificant whitespace: `["FINANCE.ORDERS",1001]`.
+  The key values are those of the table's `primary_key` columns.
+  For a table with an empty `primary_key`, they are the values of a unique key the publisher selects and keeps for the life of the table, and for a table with neither, the row identity is the `subject` alone.
+  The key's encoding is the publisher's choice and MUST NOT change for the life of the stream.
+  On a data topic that has compaction enabled and carries more than one subject, the key MUST also include the `subject`, so that compaction does not treat rows of different tables with equal key values as one row.
+
+*Note.* Kafka assigns partitions by hashing the key's bytes, so the encoding decides each row's partition, and changing it would move rows between partitions, which B-KFK-22 forbids.
+No client reads the key: row identity for applying changes comes from `primary_key` in OBJECT_METADATA ([core Appendix A.4][core-a4], C-KEY-1).
+A Debezium key, a struct of the key columns written by the key converter, satisfies this rule, apart from the null key Debezium writes for a table with neither a primary nor a unique key (Section 7).
 
 - **B-KFK-22.** The partition of a data-topic record MUST be a deterministic function of its key and the topic's partition count, and the function MUST NOT change for the life of the stream.
   Records with equal keys on one topic MUST be written to the same partition.
@@ -403,7 +410,7 @@ This binding keys by row instead and restores transaction structure from `cdcxid
 Likewise a TRUNCATE is keyed by subject alone and lands in one partition, apart from the table's row events, and DDL events are on the control topic (B-KFK-9).
 A client applying partitions independently can then apply such an event before earlier changes it should follow.
 A client that orders transactions by the transaction topic (5.4) is unaffected.
-This is the same hazard Debezium avoids by emitting a DELETE and a CREATE for a key change; OpenCDC keeps the single UPDATE.
+Debezium avoids the hazard for key changes by emitting a DELETE under the old key and a CREATE under the new key, which keeps the DELETE ordered with the row's earlier changes; whether an OpenCDC producer may represent a key change that way is Section 8, deferred core item 8.
 
 ### 3.5. Non-Event Records
 
@@ -738,7 +745,10 @@ Rows rest on the public documentation only; a *verified* column will be added on
 | CloudEvents `metadata.source` (`id:generate`)                     | Converted                       | Debezium derives `id` from content; the core requires UUID v4 for DML and DDL (3)                                              |
 | `topic.prefix`                                                    | Mapped                          | Natural `<stream>` name (B-KFK-8)                                                                                              |
 | Default topic per table (`<prefix>.<schema>.<table>` on PostgreSQL) | Carried                        | Data topics; one subject per topic (B-KFK-30)                                                                                  |
-| Topic routing SMT (`ByLogicalTableRouter`)                        | Mapped with constraint          | Several subjects per data topic are allowed if listed in the descriptor; the key must still satisfy B-KFK-21 (4)              |
+| Default record key (key columns as a struct, via `key.converter`) | Carried                         | A deterministic function of row identity (B-KFK-21); the encoding must not change for the life of the stream                   |
+| Null key for a table with neither a primary nor a unique key      | Add                             | B-KFK-21 forbids a null key; key such tables by table name, or give each its own single-partition topic                        |
+| Primary key change as DELETE plus CREATE (`__debezium.newkey`, `__debezium.oldkey` headers) | Open          | Whether OpenCDC admits this representation is a core question (Section 8, deferred core item 8)                                |
+| Topic routing SMT (`ByLogicalTableRouter`)                        | Mapped with constraint          | Several subjects per data topic are allowed if listed in the descriptor; on a compacted topic `key.enforce.uniqueness=true` is required (B-KFK-21) (4) |
 | Partition routing SMT (`PartitionRouting`)                        | Mapped with constraint          | Must be a deterministic function of row identity (B-KFK-21, B-KFK-22)                                                          |
 | `message.key.columns`                                             | Mapped with constraint          | Only immutable columns preserve per-row partitioning; mutable key columns move a row between partitions (B-KFK-21)             |
 | `tombstones.on.delete`                                            | Mapped with constraint          | `true` only on compacted data topics (B-KFK-62); `false` otherwise, since tombstones are not events (B-KFK-25)                 |
@@ -803,6 +813,8 @@ None is ratified; each is a place where this draft made a call so that review ha
     The first draft forbade it outright; that was revised on 23 September 2026 after review, because compacted change topics are common practice as table-state sources and compaction beyond the window does not affect any replayable event.
 11. DDL events are carried on the control topic, not on data topics (B-KFK-9, B-KFK-59, B-KFK-64), revised on 23 September 2026 after review.
     Core Section 2.5 permits DDL on a channel separate from DML, subject-keyed DDL had no order against a table's other partitions anyway, and the single-partition control topic keeps each `ddl.CREATE` on one channel with its OBJECT_METADATA without copying schema onto data topics.
+12. Record keys follow row identity with a unique-key fallback, never null, in an encoding the publisher chooses and keeps (B-KFK-21), revised on 23 September 2026 after review.
+    The first draft recommended a JSON-array encoding that included the table name; that would have moved every row of an existing Debezium deployment to a different partition, while no client reads the key's contents.
 
 ### 8.2. Deferred Features
 
@@ -838,11 +850,15 @@ Recorded so they are not lost:
    This binding cites R-POS-7 and P-RET-1 by their body definitions.
 7. **Trace attribute names.** Core Section 13.1 names `trace_id` and `correlation_id` as extension attributes.
    CloudEvents attribute names are lower-case letters and digits only, so neither maps to a `ce_` header as named; the CloudEvents distributed tracing extension uses `traceparent`.
+8. **Primary key changes.** The core does not say how an UPDATE that changes a row's primary key is represented.
+   Debezium emits a DELETE for the old key and a CREATE for the new one, which on Kafka keeps each key's history in one partition and lets compaction clear the old key; this binding assumes a single UPDATE keyed by the new key (3.4 note, B-KFK-62).
+   The core should say whether the DELETE and INSERT pair is conformant and, if so, how the two events are correlated.
 
 ### 8.4. Open Items
 
 1. **Conventions update.** Add `Publisher` and `Deployment` to the register `who` vocabulary in [binding-formatting-decisions.md][formatting] (8.1, decision 6), and generalize `bindings/tools/check_binding.py`, which is currently specific to the WSS + AsyncAPI binding (identifier prefix, AsyncAPI template, close-code table).
-2. **Key encoding.** Whether the JSON-array key of B-KFK-21 should be a MUST, so that tools can rely on it, and how values whose wire encoding is a JSON object are canonicalized.
+2. **Key encoding.** Resolved in favor of the publisher's choice, fixed for the life of the stream (B-KFK-21, 8.1 decision 12), so that existing deployments keep their partition assignment.
+   What remains open is whether to recommend an encoding for new publishers, for tooling.
 3. **Size-based retention.** Whether to admit `retention.bytes` with a declared byte budget instead of excluding it (B-KFK-35).
 4. **Conformance fixtures.** Positive and negative record examples and topic configurations linked to `B-KFK-*` identifiers, in a `conformance/` directory.
 5. **Validation against captured Debezium output** with the CloudEvents converter, to add the *verified* column to Section 7.

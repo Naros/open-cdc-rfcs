@@ -129,8 +129,8 @@ requirements:
   level: MUST
   who: Publisher
   section: '3.4'
-  requirement: A data-topic record key MUST be a deterministic function of subject and, for row events of keyed tables, the primary key values (TRUNCATE by subject
-    only); the JSON-array encoding SHOULD be used.
+  requirement: A data-topic record key MUST be a deterministic, non-null function of row identity (primary key, else a selected unique key, else subject; TRUNCATE
+    by subject), in an encoding that MUST NOT change for the life of the stream, including the subject on compacted multi-subject topics.
 - id: B-KFK-22
   level: MUST
   who: Publisher

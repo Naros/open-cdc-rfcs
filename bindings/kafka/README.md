@@ -163,7 +163,7 @@ The *channel* of core Terms and Definitions corresponds to a partition, not a to
   A stream with a compacted data topic MUST NOT declare an `unbounded` replay window.
   Beyond the replay window a compacted data topic holds table state, the latest record per key, rather than an OpenCDC changelog (B-KFK-63).
 
-*Why compaction is admitted.* A compacted change topic doubles as a table-state source: a new sink can bootstrap from the latest record per key without a fresh snapshot, and this is common practice with Debezium, whose delete tombstones exist for it.
+*Why compaction is admitted.* A compacted change topic doubles as a table-state source: a new sink can bootstrap from the latest record per key without a fresh snapshot, and existing CDC deployments commonly use it this way, writing delete tombstones for the purpose.
 Kafka never compacts records newer than `min.compaction.lag.ms`, so with the lag at least the replay window, every event a client may replay is intact, exactly as on a `delete` topic.
 Only the region beyond the window changes, from nothing to table state.
 - **B-KFK-8.** The control and transaction topics SHOULD be named `<stream>.opencdc.control` and `<stream>.opencdc.transactions`, where `<stream>` is the stream name (6.2).
@@ -390,7 +390,7 @@ The rules below keep every change to one row in one partition, which is what per
 
 *Note.* Kafka assigns partitions by hashing the key's bytes, so the encoding decides each row's partition, and changing it would move rows between partitions, which B-KFK-22 forbids.
 No client reads the key: row identity for applying changes comes from `primary_key` in OBJECT_METADATA ([core Appendix A.4][core-a4], C-KEY-1).
-A Debezium key, a struct of the key columns written by the key converter, satisfies this rule, apart from the null key Debezium writes for a table with neither a primary nor a unique key (Section 7).
+A key built from the key columns alone, as existing CDC connectors commonly write it, satisfies this rule, provided the publisher does not write a null key for a table with neither a primary nor a unique key (Section 7).
 
 - **B-KFK-22.** The partition of a data-topic record MUST be a deterministic function of its key and the topic's partition count, and the function MUST NOT change for the life of the stream.
   Records with equal keys on one topic MUST be written to the same partition.
@@ -410,7 +410,7 @@ This binding keys by row instead and restores transaction structure from `cdcxid
 Likewise a TRUNCATE is keyed by subject alone and lands in one partition, apart from the table's row events, and DDL events are on the control topic (B-KFK-9).
 A client applying partitions independently can then apply such an event before earlier changes it should follow.
 A client that orders transactions by the transaction topic (5.4) is unaffected.
-Debezium avoids the hazard for key changes by emitting a DELETE under the old key and a CREATE under the new key, which keeps the DELETE ordered with the row's earlier changes; whether an OpenCDC producer may represent a key change that way is Section 8, deferred core item 8.
+The hazard for key changes is avoided by emitting a DELETE under the old key and an INSERT under the new key, which keeps the DELETE ordered with the row's earlier changes; whether an OpenCDC producer may represent a key change that way is Section 8, deferred core item 8.
 
 ### 3.5. Non-Event Records
 

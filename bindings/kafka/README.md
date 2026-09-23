@@ -162,6 +162,10 @@ The *channel* of core Terms and Definitions corresponds to a partition, not a to
 - **B-KFK-7 (Deployment).** Every data topic MUST have a `cleanup.policy` of `delete`, `compact`, or `compact,delete`.
   On a data topic with compaction enabled, the deployment MUST set `min.compaction.lag.ms` explicitly; its default of 0 would give the stream a replay window of zero (B-KFK-45).
   Records older than a compacted topic's lag are table state, at least the latest record per key and possibly no other, rather than an OpenCDC changelog (B-KFK-63).
+  A deployment whose clients need complete transactions and their TRX_COMMIT markers beyond the replay window MUST NOT enable compaction on its data topics (B-KFK-63).
+  State taken from the compacted region of a multi-partition data topic is not valid across a TRUNCATE (3.5); a deployment whose clients need it to be gives that topic a single partition, does not enable compaction on it, or does not capture TRUNCATE for its tables (3.5), none of which the broker enforces for it.
+- **B-KFK-67 (Deployment).** A data topic whose `cleanup.policy` includes `compact` MUST NOT receive a record with a null key.
+  The deployment MUST NOT give a data topic such a `cleanup.policy`, at creation or later, while the publisher is configured to write null keys to it (B-KFK-21); where it needs compaction, it first configures the publisher to key those records by `subject`.
 
 *Why compaction is admitted.* Compaction on a data topic is a broker storage optimization: once a later record for a key supersedes an earlier one, the broker need not keep the earlier one.
 Kafka never compacts a record newer than the topic's `min.compaction.lag.ms`, and that lag bounds the replay window (B-KFK-45), so every event a client reads within the window is intact and in order, exactly as on a `delete` topic.
@@ -172,8 +176,11 @@ That retained state is not a substitute for a snapshot, and a reader that takes 
 - A DELETE remains the latest record for its key, so a reader that inspects the event sees the row as removed.
   A reader that treats any non-null value as a present row sees the removal only if the publisher wrote a tombstone (B-KFK-62), and only if its scan reaches the tombstone within `delete.retention.ms` of the log cleaner's first pass over it ([KIP-534][kip-534]), which comes no earlier than `min.compaction.lag.ms` after the tombstone is written.
 - After a primary-key change, the old key keeps its last record unless the publisher wrote a tombstone for it (B-KFK-62).
-- A TRUNCATE is keyed by its subject (B-KFK-21) and removes no row key.
+- On a compacted topic a TRUNCATE is keyed by its subject (B-KFK-21, B-KFK-67) and removes no row key.
   Replayed in offset order on a single-partition topic it still takes effect correctly; on a multi-partition topic, beyond the window, nothing orders it against the table's rows in other partitions.
+- For a keyless table keyed by its `subject` (B-KFK-21), every row shares one key, so beyond the window compaction can reduce the whole table to a single record rather than one per row, and every record of the table lands on one partition whatever the topic's partition count.
+  A data topic carrying such a table SHOULD NOT have compaction enabled unless the deployment accepts that outcome, for example because the table holds at most one row; a deployment that must prevent it can reject compaction for the topic at the broker with a `create.topic.policy.class.name` or `alter.config.policy.class.name` policy, which applies whatever the publisher, though no stock policy performs this check and managed Kafka services may not accept one.
+  A keyless table with substantial change volume can use null keys instead (B-KFK-21), and a record with a null key cannot be written to a compacted topic at all (B-KFK-67).
 
 Many CDC deployments write delete tombstones so that a compacted topic can seed a new sink.
 Whether that is adequate for a given sink is a deployment decision; a sink that needs accurate table state takes a fresh snapshot.
@@ -187,7 +194,7 @@ Whether that is adequate for a given sink is a deployment decision; a sink that 
 | ----------- | ---------- | ---------------- | ------------------------------------------------------------------------ | ----------------------------------------- |
 | Control     | 1          | `compact`        | STREAM_METADATA; durable OBJECT_METADATA; `ddl.*`                         | Fixed per record kind (B-KFK-23)          |
 | Transaction | 1          | `delete`         | TRX_COMMIT; HEARTBEAT                                                    | `cdcxid` for TRX_COMMIT; none for HEARTBEAT |
-| Data        | Fixed, 1 or more | `delete`, or compaction with a lag (B-KFK-7) | `dml.*` (including TRUNCATE), `snapshot.READ`; tombstones on compacted topics (B-KFK-62) | Row identity, or the subject (B-KFK-21)   |
+| Data        | Fixed, 1 or more | `delete`, or compaction with a lag (B-KFK-7) | `dml.*` (including TRUNCATE where captured, 3.5), `snapshot.READ`; tombstones on compacted topics (B-KFK-62) | Row identity, or the subject (B-KFK-21)   |
 
 *Why a transaction topic with one partition.* Data events are spread over many partitions and lose their cross-partition order.
 The transaction topic restores it: because it has one partition, one writer (B-KFK-60), and the publisher writes markers in commit order (B-KFK-43), the sequence of TRX_COMMIT records on it, after deduplication by `(source, id)`, is the source commit order of the stream.
@@ -387,26 +394,41 @@ content-type: application/json
 The record key decides the partition, and the partition is the only unit in which Kafka preserves order.
 The rules below keep every change to one row in one partition, which is what per-row order depends on.
 
-- **B-KFK-21.** The key of a data-topic record MUST be a deterministic function of the row identity of the event it carries, and MUST NOT be null.
+- **B-KFK-21.** The key of a data-topic record MUST be a deterministic function of the row identity of the event it carries, and MUST NOT be null except as permitted below.
   Row identity is:
 
 | Event                                                          | Row identity                                        |
 | -------------------------------------------------------------- | --------------------------------------------------- |
 | `dml.INSERT`, `dml.UPDATE`, `dml.UPSERT`, `snapshot.READ`      | The key values of `after`                           |
 | `dml.DELETE`                                                   | The key values of `before`                          |
-| `dml.TRUNCATE`                                                 | The `subject`                                       |
+| `dml.TRUNCATE`                                                 | The `subject`, or no key (below)                    |
 
-  The key values are those of the table's `primary_key` columns.
-  For a table with an empty `primary_key`, they are the values of a unique key the publisher selects and keeps for the life of the table, and for a table with neither, the row identity is the `subject` alone.
-  The key's encoding is the publisher's choice and MUST NOT change for the life of the stream.
+  The key values are those of the `primary_key` columns declared in OBJECT_METADATA, whether the source table's primary key or a configured surrogate key; a table whose `primary_key` is empty is keyless and has no per-row identity.
+  For a keyless table the key is the `subject` alone, so every row of the table shares one key; alternatively, the publisher MAY write a null key for the table's `dml.INSERT`, `dml.UPDATE`, `dml.UPSERT`, `snapshot.READ`, and `dml.DELETE` records.
+  A `dml.TRUNCATE` MAY likewise carry a null key and no key schema, which a schema-registry key serializer writes without registering anything.
+  Whether a publisher writes null keys for a subject, and the key's encoding otherwise, are the publisher's choice and MUST NOT change for the life of the stream.
   On a data topic that has compaction enabled and carries more than one subject, the key MUST also include the `subject`, so that compaction does not treat rows of different tables with equal key values as one row.
 
 *Note.* Kafka assigns partitions by hashing the key's bytes, so the encoding decides each row's partition, and changing it would move rows between partitions, which B-KFK-22 forbids.
-No client reads the key: row identity for applying changes comes from `primary_key` in OBJECT_METADATA ([core Appendix A.4][core-a4], C-KEY-1).
-A key built from the key columns alone, as existing CDC connectors commonly write it, satisfies this rule, provided the publisher does not write a null key for a table with neither a primary nor a unique key (Section 7).
+No client reads the key: row identity for applying changes comes from `primary_key` in OBJECT_METADATA ([core Appendix A.4][core-a4], C-KEY-1), and a consumer's row identity, including C-KEY-1's full-row fallback for a keyless table, is independent of the record key.
+A key built from the key columns alone, as existing CDC connectors commonly write it, satisfies this rule.
+
+*Note.* A record with a null key is not a tombstone: a tombstone has a key and a null value (B-KFK-62), while a null-keyed record has an event as its value.
+
+*Note.* Kafka rejects a record without a key on a topic whose `cleanup.policy` includes `compact` (`INVALID_RECORD`).
+A publisher cannot reliably learn a topic's `cleanup.policy` when it writes, so this binding leaves prevention to the deployment (B-KFK-67).
+A rejected record is a non-retriable error that stops the whole stream (B-KFK-53); because the publisher advances its checkpoint only after acknowledgement (B-KFK-47), it sends the record again once the deployment corrects the configuration.
+
+*Note.* A `subject` key has a different shape from a keyed table's key-column struct, so the record keys on one data topic need not share a schema: a TRUNCATE keyed by `subject` beside keyed rows, or a keyless table beside keyed tables.
+This binding carries JSON without a schema registry, where that is harmless; an encoding that validates keys against a registry (8.2 item 3) cannot use a one-schema-per-topic key subject strategy for such a topic.
+A null key registers nothing.
 
 - **B-KFK-22.** The partition of a data-topic record MUST be a deterministic function of its key and the topic's partition count, and the function MUST NOT change for the life of the stream.
   Records with equal keys on one topic MUST be written to the same partition.
+  A record with a null key (B-KFK-21) is exempt: the producer's partitioner chooses its partition, which can differ between sends of the same event, including a resend after a publisher restart (B-KFK-47).
+
+*Note.* A keyless table written with null keys to a topic with more than one partition has its rows spread across partitions, and a null-keyed TRUNCATE can land in any partition.
+As on any multi-partition topic, a client that needs events in order uses `cdcpos`, `cdcxid`, and the transaction topic (5.4), not partition arrival; a deployment that wants such a table's events in partition order gives it a single-partition topic.
 - **B-KFK-23.** On the control topic the key MUST be `opencdc:stream-metadata` for STREAM_METADATA, `opencdc:object-metadata:` followed by the event `id` for OBJECT_METADATA, and `opencdc:ddl:` followed by the event `id` for a `ddl.*` event.
   On the transaction topic the key of a TRX_COMMIT record MUST be its `cdcxid`, and a HEARTBEAT record MUST have no key.
 - **B-KFK-24.** The event's `partitionkey` attribute, when present, is carried unchanged ([CloudEvents Kafka binding section 3.1][ce-kafka-key]).
@@ -420,7 +442,7 @@ On Kafka that places a row's changes in different partitions whenever they fall 
 This binding keys by row instead and restores transaction structure from `cdcxid` and the transaction topic (Section 8, deferred core item 4).
 
 *Note.* An UPDATE that changes a primary key is keyed by its new key, so it can land in a different partition from earlier changes to the same row.
-Likewise a TRUNCATE is keyed by subject alone and lands in one partition, apart from the table's row events, and DDL events are on the control topic (B-KFK-9).
+Likewise a TRUNCATE is keyed by subject alone and lands in one partition, apart from the table's row events, and a null-keyed TRUNCATE lands in whichever partition the producer chooses, possibly a different one if it is sent again; DDL events are on the control topic (B-KFK-9).
 A client applying partitions independently can then apply such an event before earlier changes it should follow.
 A client that orders transactions by the transaction topic (5.4) is unaffected.
 The hazard for key changes is avoided by emitting a DELETE under the old key and an INSERT under the new key, which keeps the DELETE ordered with the row's earlier changes; whether an OpenCDC producer may represent a key change that way is Section 8, deferred core item 8.
@@ -441,7 +463,10 @@ The hazard for key changes is avoided by emitting a DELETE under the old key and
 *Note.* An OpenCDC DELETE carries its before image, so it is never itself a tombstone and does not remove its key under compaction; the tombstone is what lets compaction eventually drop a deleted row.
 Without the tombstone for the old key, a primary-key change leaves the row's previous record under that key, and a sink that bootstraps from the compacted region restores a row that no longer exists.
 A TRUNCATE is keyed by its subject (B-KFK-21), so compaction keeps it alongside every earlier row of the table under their own keys; on a multi-partition topic, beyond the window, nothing orders it against those rows, and a bootstrapping sink can restore rows the TRUNCATE removed.
-This revision does not fix the TRUNCATE case (Section 8, open item 8).
+A deployment that needs correct state across a TRUNCATE avoids this configuration (B-KFK-7).
+
+*Note.* Whether a TRUNCATE at the source reaches the stream as a `dml.TRUNCATE` depends on the source engine and the producer, not on this binding: some engines do not record a TRUNCATE where a capture layer can read it, and some producers capture it only when configured to, independently of `ddl_capture`, which governs only `ddl.*` events (core [Section 9.2][core-9-2]).
+A stream can therefore carry no `dml.TRUNCATE` for a table that was truncated at the source, and a client cannot take the absence of one as evidence that none occurred.
 
 ### 3.6. Size Limits
 
@@ -798,7 +823,8 @@ Runtime settings are in 7.1.
 | `topic.prefix`                                                    | Mapped                          | Natural `<stream>` name (B-KFK-8)                                                                                              |
 | Default topic per table (`<prefix>.<schema>.<table>` on PostgreSQL) | Carried                        | Data topics; one subject per topic (B-KFK-30)                                                                                  |
 | Default record key (key columns as a struct, via `key.converter`) | Carried                         | A deterministic function of row identity (B-KFK-21); the encoding must not change for the life of the stream                   |
-| Null key for a table with neither a primary nor a unique key      | Add                             | B-KFK-21 forbids a null key; key such tables by table name, or give each its own single-partition topic                        |
+| Null key for a table with an empty `primary_key`                  | Carried, with constraint        | Permitted by B-KFK-21; a data topic with compaction must not receive it (B-KFK-67), so a deployment that compacts the topic first keys such tables by table name, or configures a surrogate key (`message.key.columns`) declared as `primary_key` |
+| Truncate event (`op: t`), null key                                | Carried, with constraint        | Valid as written (B-KFK-21); a data topic with compaction must not receive it (B-KFK-67), so a deployment that compacts the topic first adds a transform that keys the event by its `subject` and leaves the event value unchanged. Debezium writes truncate events only when `skipped.operations` does not list `t`, and its default lists `t`, so they are suppressed unless the deployment changes it; even then, some source databases do not record a TRUNCATE where a connector can capture it (3.5). A consumer watching the stream alone cannot tell either case from a table that was never truncated. |
 | Primary key change as DELETE plus CREATE (`__debezium.newkey`, `__debezium.oldkey` headers) | Open          | Whether OpenCDC admits this representation is a core question (Section 8, deferred core item 8)                                |
 | Topic routing SMT (`ByLogicalTableRouter`)                        | Mapped with constraint          | Several subjects per data topic are allowed, each on one topic only (B-KFK-30); on a compacted topic `key.enforce.uniqueness=true` is required (B-KFK-21) (4) |
 | Partition routing SMT (`PartitionRouting`)                        | Mapped with constraint          | Must be a deterministic function of row identity (B-KFK-21, B-KFK-22)                                                          |
@@ -859,7 +885,7 @@ None is ratified; each is a place where this draft made a call so that review ha
     The first draft forbade it outright; that was revised on 23 September 2026 after review, because compacted change topics are common practice as table-state sources and compaction beyond the window does not affect any replayable event.
 11. DDL events are carried on the control topic, not on data topics (B-KFK-9, B-KFK-59, B-KFK-64), revised on 23 September 2026 after review.
     Core Section 2.5 permits DDL on a channel separate from DML, subject-keyed DDL had no order against a table's other partitions anyway, and the single-partition control topic keeps each `ddl.CREATE` on one channel with its OBJECT_METADATA without copying schema onto data topics.
-12. Record keys follow row identity with a unique-key fallback, never null, in an encoding the publisher chooses and keeps (B-KFK-21), revised on 23 September 2026 after review.
+12. Record keys follow row identity from `primary_key`, in an encoding the publisher chooses and keeps (B-KFK-21); a null key is admitted only for a keyless table's rows and for TRUNCATE, and never reaches a compacted topic (B-KFK-67), revised on 23 September 2026 after review.
     The first draft recommended a JSON-array encoding that included the table name; that would have moved every row of an existing Debezium deployment to a different partition, while no client reads the key's contents.
 13. `ordering_scope` is fixed at `"channel"` (B-KFK-31), revised on 23 September 2026 after review.
     The first draft recommended it only for publishers that partition in-process, which on Kafka is every publisher; a conditional value would have tied the declaration to partitioner configuration.
@@ -868,6 +894,7 @@ None is ratified; each is a place where this draft made a call so that review ha
 15. The stream descriptor is removed, and clients are configured with the stream's topics as Kafka consumers are (6.1, B-KFK-55, B-KFK-66), revised on 23 September 2026 after review.
     Every member the descriptor carried was client configuration, carried on each record (content mode, `subject`), or topic configuration read from Kafka, and keeping a copy on the control topic was the source of repeated drift and ownership problems.
     B-KFK-16, B-KFK-56, and B-KFK-57 are withdrawn.
+16. Ordering a TRUNCATE in the compacted region is a documented limitation rather than a client or topic mechanism: a deployment that needs transaction fidelity or correct state across a TRUNCATE beyond the replay window avoids multi-partition compaction for those tables (B-KFK-7), adopted on 23 September 2026 after review.
 
 ### 8.2. Deferred Features
 
@@ -876,7 +903,7 @@ Not in this revision; each would be a document revision, not a wire change:
 1. **Single-partition ordered profile.** A stream on one data topic with one partition preserves `ordering_scope: "stream"` end to end.
    Claiming it needs a structural guarantee that the partition count cannot change (for example, an `Alter` and `AlterConfigs` ACL policy), which this revision does not define ([core Appendix B.4][core-b4]).
 2. **Ephemeral Mode.** Requires a core-approved loss signal.
-3. **Format composition** (Avro, Protocol Buffers), including schema-registry serializers.
+3. **Format composition** (Avro, Protocol Buffers), including schema-registry serializers and the key subject strategy that a data topic mixing key shapes requires (B-KFK-21); uniformity is not to be achieved by making key columns nullable.
 4. **AsyncAPI template** with Kafka channel bindings and an `x-opencdc` extension naming the stream's topic roles.
 5. **HEARTBEAT on data topics**, for per-partition liveness.
 6. **Schema and DDL pruning.** Removing OBJECT_METADATA versions and DDL events that no retained data event needs, with the tombstone rules that would allow it (R-POS-7).
@@ -910,6 +937,7 @@ Recorded so they are not lost:
 9. **Replay window.** The core uses "replay window" normatively (R-POS-6, R-POS-7, P-RET-1, Sections 12 and 15.1, Appendix B.3) but does not define it, and attributes it two ways: R-POS-7 speaks of "the replay window the producer supports", while Section 15.1 and Appendix B.3 speak of "the deployment's supported replay window".
    On Kafka the window is set by topic retention, which the broker operator owns, so this binding treats it as a deployment property (B-KFK-45).
    The core should define the term and assign it to one party.
+10. **Operation capture declaration.** The core declares DDL capture (`ddl_capture`) but has no field saying whether a producer emits `dml.TRUNCATE`, so a client cannot tell a stream that captures TRUNCATE from one that does not (3.5).
 
 ### 8.4. Open Items
 
@@ -921,8 +949,8 @@ Recorded so they are not lost:
 5. **Validation against captured Debezium output** with the CloudEvents converter, to add the *verified* column to Section 7.
 6. **Kafka-compatible services.** A short note, per service, of which 1.6 capabilities it lacks (for example log compaction or record headers on some tiers).
 7. **Descriptor media type.** *Closed:* the descriptor was removed (8.1, decision 15).
-8. **TRUNCATE on compacted data topics.** Beyond the replay window of a multi-partition compacted topic, nothing orders a TRUNCATE against the table's rows in other partitions, so a sink that bootstraps from that region can restore rows the TRUNCATE removed (1.4, 3.5 note).
-   Options include tombstoning every key of the table (which requires the publisher to know them), excluding TRUNCATE from compacted streams, or declaring that compacted state is not valid across a TRUNCATE.
+8. **TRUNCATE on compacted data topics.** *Closed as a documented limitation:* beyond the replay window of a multi-partition compacted topic nothing orders a TRUNCATE against the table's rows in other partitions (1.4, 3.5 note), just as nothing guarantees any transaction there (B-KFK-63); a deployment that needs correct state across a TRUNCATE avoids that configuration (B-KFK-7, 8.1 decision 16).
+   A client rule comparing positions, and TRUNCATE on the transaction topic with retention for the life of the stream, were considered and not adopted; tombstoning every key of the table was rejected, because log-based capture records no row keys for a TRUNCATE.
 
 ## 9. References
 
@@ -955,6 +983,7 @@ Recorded so they are not lost:
 [core-8-4-3]: https://github.com/open-cdc-hq/open-cdc-spec/blob/main/spec/OpenCDC-Specification.md#843-canonical-discontinuity-scenarios
 [core-9]: https://github.com/open-cdc-hq/open-cdc-spec/blob/main/spec/OpenCDC-Specification.md#9-ddl-events
 [core-9-1]: https://github.com/open-cdc-hq/open-cdc-spec/blob/main/spec/OpenCDC-Specification.md#91-ddl-payload-structure
+[core-9-2]: https://github.com/open-cdc-hq/open-cdc-spec/blob/main/spec/OpenCDC-Specification.md#92-truncate
 [core-10-1]: https://github.com/open-cdc-hq/open-cdc-spec/blob/main/spec/OpenCDC-Specification.md#101-heartbeat
 [core-10-4]: https://github.com/open-cdc-hq/open-cdc-spec/blob/main/spec/OpenCDC-Specification.md#104-stream_metadata
 [core-10-5-4]: https://github.com/open-cdc-hq/open-cdc-spec/blob/main/spec/OpenCDC-Specification.md#1054-layering-and-replay

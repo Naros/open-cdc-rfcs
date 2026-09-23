@@ -60,6 +60,9 @@ It adds the stream-level semantics OpenCDC requires and CloudEvents does not def
 
 7. [Mapping from Existing Implementations](#7-mapping-from-existing-implementations)
 
+- 7.1. [Kafka Connect](#71-kafka-connect)
+- 7.2. [Debezium](#72-debezium)
+
 8. [Decisions, Deferrals, and Open Items](#8-decisions-deferrals-and-open-items)
 
 - 8.1. [Decisions Taken](#81-decisions-taken)
@@ -507,6 +510,9 @@ A single-partition profile that would preserve `ordering_scope: "stream"` end to
   A relay that renames topics or converts the content mode MUST rewrite the stream descriptor accordingly; the descriptor is the only record a relay may rewrite.
   A relay that violates this is not covered by the stream deployment's claim.
 
+*Note.* The producer settings in B-KFK-32, B-KFK-46, B-KFK-48, and B-KFK-60 belong to whatever creates the Kafka producer, which is not always the component that produces the events.
+In Kafka Connect the worker creates it, so a connector cannot establish these settings itself (7.1).
+
 *Note.* A relay does not preserve offsets.
 Committed consumer-group offsets from the source cluster are not valid on the target; a client that moves to a copy repositions by `cdcpos` and `(source, id)`, or by an offset translation the relay provides as a convenience (for example MirrorMaker 2 checkpoints).
 
@@ -739,13 +745,51 @@ An AsyncAPI template for this binding, analogous to the WSS + AsyncAPI binding's
 ## 7. Mapping from Existing Implementations
 
 This section is informative.
-It records how the configuration surface of [Debezium][debezium] source connectors running on Kafka Connect, with the [Debezium CloudEvents converter][debezium-ce], relates to this binding, from the published documentation.
-It is not an implementation plan and does not assert that any option, as documented, produces OpenCDC-conformant output: Debezium's change event envelope and its CloudEvents mapping still require the OpenCDC payload and metadata transformation the core defines.
+It records how existing implementations relate to this binding, from their published documentation: 7.1 covers the Kafka Connect runtime, which many CDC connectors share, and 7.2 covers Debezium, a set of source connectors that runs on it.
+It is not an implementation plan and does not assert that any option, as documented, produces OpenCDC-conformant output.
 Rows rest on the public documentation only; a *verified* column will be added once captured records are analysed (Section 8, open item 5).
 
 "Fixed" means the binding requires a specific value; "excluded" means the option produces a stream that is not OpenCDC-conformant, or a deployment that does not satisfy this binding, and so cannot be claimed; "out of scope" means a provisioning or producer-internal concern the binding does not see; "converted" means a semantic mapping the publisher must implement, not a rename; "add" means a capability the implementation does not document.
 
-| Debezium or Kafka Connect option                                  | Disposition                     | Note                                                                                                                           |
+### 7.1. Kafka Connect
+
+A source connector running on [Kafka Connect][kafka-connect] does not write to Kafka itself.
+The worker creates the Kafka producer, runs any transforms, applies the key, value, and header converters, and commits the connector's source offsets.
+Several publisher requirements are therefore met, or broken, by the worker's configuration rather than by the connector, and a Connect-based stream deployment's claim depends on both.
+
+| Kafka Connect setting                                             | Disposition                     | Note                                                                                                                           |
+| ----------------------------------------------------------------- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| Worker `producer.acks`, `producer.enable.idempotence`, `producer.max.in.flight.requests.per.connection` | Fixed | `acks=all`, with idempotence on or one request in flight (B-KFK-32, B-KFK-46) (1)                                   |
+| Connector `producer.override.*`, worker `connector.client.config.override.policy` | Mapped with constraint | Per-connector producer settings must also satisfy B-KFK-32 and B-KFK-46; the worker's policy decides whether they apply (1) |
+| Worker `exactly.once.source.support`, connector `exactly.once.support` ([KIP-618][kip-618]) | Optional | Fences a previous task generation (B-KFK-60) and writes records and markers in one Kafka transaction, which satisfies the visibility part of B-KFK-43 (2) |
+| Connector `tasks.max`                                             | Mapped with constraint          | One writer for the transaction topic, and at most one per data partition (B-KFK-60) (3)                                        |
+| `errors.tolerance=all`, `errors.deadletterqueue.topic.name`       | Excluded                        | Skips or diverts records (B-KFK-53)                                                                                            |
+| `key.converter`                                                   | Mapped with constraint          | Its output is the record key, whose encoding must not change for the life of the stream (B-KFK-21)                             |
+| `value.converter`                                                 | Mapped                          | Writes the event in the declared content mode (B-KFK-1, B-KFK-19, B-KFK-20)                                                    |
+| `header.converter`                                                | Mapped with constraint          | In binary mode, must write `ce_` header values as UTF-8 strings (B-KFK-20)                                                     |
+| `transforms` (single message transforms)                          | Mapped with constraint          | Filtering or rewriting after ordinals and markers are assigned breaks B-KFK-44 (4)                                             |
+| `topic.creation.enable`, `topic.creation.*` (KIP-158)             | Mapped                          | Topics must be created with the configuration of 1.4, 4.2, and 5.6; broker auto-creation with defaults does not satisfy it     |
+| Source offset commit                                              | Carried                         | Connect commits a source offset only once the producer has acknowledged the record (B-KFK-47)                                  |
+
+Notes:
+
+1. A connector cannot set producer properties itself.
+   They come from the worker configuration, with the `producer.` prefix, or from the connector configuration, with the `producer.override.` prefix, where the worker's override policy permits it; the effective values are what the claim rests on.
+2. Exactly-once source support must be enabled on every worker in the cluster and supported by the connector.
+   It is optional under this binding: B-KFK-43 can also be met by waiting for acknowledgements before writing a marker, and B-KFK-60 by any other fencing mechanism.
+3. A connector that runs one task per source satisfies B-KFK-60 only if a task from an earlier generation cannot still be writing after a rebalance.
+   Connect fences such tasks when exactly-once source support is enabled; without it, the deployment needs another way to exclude a second writer.
+   A connector that runs several tasks for one stream has several producers, and would need all markers written by one of them, or a separate stream per task.
+4. Transforms run before the converters.
+   Where the OpenCDC ordinals and markers are assigned (by the connector, a transform, or the converter) decides which transforms may still filter records.
+
+### 7.2. Debezium
+
+This subsection records how the configuration surface of [Debezium][debezium] source connectors, with the [Debezium CloudEvents converter][debezium-ce], relates to this binding.
+Debezium's change event envelope and its CloudEvents mapping still require the OpenCDC payload and metadata transformation the core defines.
+Runtime settings are in 7.1.
+
+| Debezium option                                                    | Disposition                     | Note                                                                                                                           |
 | ----------------------------------------------------------------- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
 | `value.converter=io.debezium.converters.CloudEventsConverter`     | Fixed                           | Structured mode only today; binary mode is documented as future work (1)                                                       |
 | CloudEvents `serializer.type`, `data.serializer.type`             | Fixed `json`                    | Avro is reserved for a format binding (1.2)                                                                                    |
@@ -771,11 +815,6 @@ Rows rest on the public documentation only; a *verified* column will be added on
 | `skipped.operations`                                              | Mapped with constraint          | Ordinals and markers over the published set (B-KFK-44) (7)                                                                    |
 | `snapshot.mode`                                                   | Out of scope                    | Snapshot events are `snapshot.READ` on data topics                                                                             |
 | `event.processing.failure.handling.mode=warn` or `skip`           | Excluded                        | Skips events (B-KFK-53)                                                                                                        |
-| Kafka Connect `errors.tolerance=all`, dead-letter queue           | Excluded                        | B-KFK-53                                                                                                                       |
-| Kafka Connect `exactly.once.support` (KIP-618)                    | Optional                        | Satisfies the visibility half of B-KFK-43 when the marker shares a Kafka transaction with its data                             |
-| Producer `acks`, `enable.idempotence`, `max.in.flight.requests.per.connection` | Fixed               | `acks=all`, idempotence on (B-KFK-32, B-KFK-46); verify the effective worker and override configuration                        |
-| `topic.creation.*` (KIP-158)                                      | Mapped                          | Must create topics with the configuration of 1.4 and 4.2; broker auto-creation with defaults does not                         |
-| Source offsets committed after producer acknowledgement           | Carried                         | Kafka Connect's offset commit waits for outstanding acknowledgements (B-KFK-47)                                                |
 
 Notes:
 
@@ -885,6 +924,7 @@ Recorded so they are not lost:
 - [Kafka Protocol Binding for CloudEvents][ce-kafka]
 - [JSON Event Format][json-format] JSON Event Format for CloudEvents
 - [Apache Kafka][kafka] and its [documentation][kafka-docs]
+- [Kafka Connect][kafka-connect]
 - [KIP-98][kip-98] Exactly Once Delivery and Transactional Messaging
 - [KIP-405][kip-405] Kafka Tiered Storage
 - [KIP-618][kip-618] Exactly-Once Support for Source Connectors
@@ -932,6 +972,7 @@ Recorded so they are not lost:
 [json-format]: https://github.com/cloudevents/spec/blob/main/cloudevents/formats/json-format.md
 [kafka]: https://kafka.apache.org
 [kafka-docs]: https://kafka.apache.org/documentation/
+[kafka-connect]: https://kafka.apache.org/documentation/#connect
 [kip-98]: https://cwiki.apache.org/confluence/display/KAFKA/KIP-98+-+Exactly+Once+Delivery+and+Transactional+Messaging
 [kip-405]: https://cwiki.apache.org/confluence/display/KAFKA/KIP-405%3A+Kafka+Tiered+Storage
 [kip-618]: https://cwiki.apache.org/confluence/display/KAFKA/KIP-618%3A+Exactly-Once+Support+for+Source+Connectors

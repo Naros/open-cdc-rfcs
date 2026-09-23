@@ -758,9 +758,9 @@ An AsyncAPI template for this binding, analogous to the WSS + AsyncAPI binding's
 ## 7. Mapping from Existing Implementations
 
 This section is informative.
-It records how existing implementations relate to this binding, from their published documentation: 7.1 covers the Kafka Connect runtime, which many CDC connectors share, 7.2 covers Debezium, a set of source connectors that runs on it, and 7.3 covers publishers that create their own Kafka producer.
+It records how existing implementations relate to this binding, chiefly from their published documentation: 7.1 covers the Kafka Connect runtime, which many CDC connectors share, 7.2 covers Debezium, a set of source connectors that runs on it, and 7.3 covers publishers that create their own Kafka producer.
 It is not an implementation plan and does not assert that any option, as documented, produces OpenCDC-conformant output.
-Rows rest on the public documentation only; a *verified* column will be added once captured records are analysed (Section 8, open item 5).
+Rows rest on the public documentation, except where a note records a fact read from an implementation's source code, which the note says, and which is to be verified against captured output (Section 8, open item 9); a *verified* column will be added once captured records are analysed (Section 8, open item 5).
 
 "Fixed" means the binding requires a specific value; "excluded" means the option produces a stream that is not OpenCDC-conformant, or a deployment that does not satisfy this binding, and so cannot be claimed; "out of scope" means a provisioning or producer-internal concern the binding does not see; "converted" means a semantic mapping the publisher must implement, not a rename; "add" means a capability the implementation does not document.
 
@@ -979,7 +979,12 @@ Recorded so they are not lost:
 9. **Replay window.** The core uses "replay window" normatively (R-POS-6, R-POS-7, P-RET-1, Sections 12 and 15.1, Appendix B.3) but does not define it, and attributes it two ways: R-POS-7 speaks of "the replay window the producer supports", while Section 15.1 and Appendix B.3 speak of "the deployment's supported replay window".
    On Kafka the window is set by topic retention, which the broker operator owns, so this binding treats it as a deployment property (B-KFK-45).
    The core should define the term and assign it to one party.
-10. **Operation capture declaration.** The core declares DDL capture (`ddl_capture`) but has no field saying whether a producer emits `dml.TRUNCATE`, so a client cannot tell a stream that captures TRUNCATE from one that does not (3.5).
+10. **TRUNCATE capture declaration.** The core has no field stating whether a producer emits `dml.TRUNCATE` for a captured table.
+    Whether a source TRUNCATE reaches the stream depends on the source engine and on the producer's configuration (3.5), and a client cannot tell from the stream alone a table where none occurred from one whose TRUNCATE was not captured or was suppressed.
+    A client needs this at setup time to refuse a stream it cannot rely on, as it may for an unrecognized `transaction_visibility` (core C-TRX-1); under this binding that is the only in-protocol action open to it, because the publisher observes nothing a client does (B-KFK-28, B-KFK-54).
+    Any remediation, such as reconciling against the source or re-snapshotting a table, is an operator act outside the stream; the declaration tells the operator whether it is needed, and does not let a client request it.
+    A declaration would state the producer's configuration, not completeness: the 3.5 note holds whatever the declared value.
+    A producer can also be configured to suppress other operation classes (B-KFK-44, 7.2 note 7); whether one declaration should cover them is for the core working group.
 
 ### 8.4. Open Items
 

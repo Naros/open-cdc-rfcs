@@ -227,8 +227,8 @@ requirements:
   level: MUST
   who: Client
   section: '5.1'
-  requirement: Before processing data or transaction records a client MUST read the control topic to its startup end offset keeping the last record per key, and MUST
-    process STREAM_METADATA first.
+  requirement: Before processing data or transaction records a client MUST hold the control topic state as of its startup end offset (last record per key), by reading
+    from the beginning or restoring a persisted cache and reading onward, and MUST process STREAM_METADATA first.
 - id: B-KFK-39
   level: MUST
   who: Client

@@ -523,12 +523,15 @@ Kafka has no session, so this section describes how a client finds a stream, whe
 ### 5.1. Discovery and Startup
 
 - **B-KFK-37.** Before writing the first record to any data topic or the transaction topic, the publisher MUST write the stream descriptor and STREAM_METADATA to the control topic and MUST have both acknowledged by the cluster.
-- **B-KFK-38 (Client).** Before processing any record from a data topic or the transaction topic, a client MUST read the control topic from its beginning to its end offset as of startup, keeping the last record for each key.
+- **B-KFK-38 (Client).** Before processing any record from a data topic or the transaction topic, a client MUST hold the control topic's state as of its end offset at startup: the last record for each key.
+  It gets there either by reading the control topic from its beginning, or by restoring a cache of that state it persisted earlier, together with the control-topic offset the cache reflects, and reading onward from that offset to the end.
   It MUST locate the stream's topics from the descriptor it read, and MUST process STREAM_METADATA before any data event ([core Appendix A.1][core-a1]).
 
 *Note.* Keeping the last record per key, in offset order on one partition, is how this binding realizes the core's advice to keep the latest metadata revision per key ([core Appendix B.4][core-b4]).
 No revision field is needed (Section 8, deferred core item 5).
 
+*Note.* The control topic is read outside any consumer group: a client assigns its one partition directly rather than subscribing, commits no offsets for it, and positions itself at the beginning or at its cached offset.
+Every client instance reads it in full, because a consumer group would give the partition to one member and leave the others without the descriptor and schemas.
 ### 5.2. Start Position
 
 A client chooses its own start position; the publisher is not involved (R-POS-2-MC).
@@ -577,7 +580,7 @@ Schema versions are cached by `id`, never overwritten by table, so that a replay
 - **B-KFK-64 (Client).** A client assembling transactions MUST include the DDL events on the control topic, matched by `cdcxid` and counted by `cdctxorder` toward `event_count` like any other event.
   A DDL event whose transaction's TRX_COMMIT precedes the client's start position on the transaction topic is outside the range the client is consuming, and the client MUST NOT process it as a new change.
 
-*Note.* A client reads the whole control topic at startup (B-KFK-38), so it sees DDL events from before its start position; the transaction topic tells it which of them are in range.
+*Note.* A client holds the whole control topic's state at startup (B-KFK-38), so it holds DDL events from before its start position; the transaction topic tells it which of them are in range.
 The control topic grows with every DDL event, including the statement text under `ddl_capture: "verbatim"`, and startup reads all of it; pruning is deferred (Section 8).
 - **B-KFK-44.** Any filtering the publisher applies (by table, operation, column value, or any other criterion) MUST take effect before `cdctxorder` values are assigned and before TRX_COMMIT `event_count` and `distribution` are computed.
   `cdctxorder` MUST be dense over the events published, and `event_count` and `distribution` MUST describe exactly those events.
@@ -783,6 +786,20 @@ Notes:
    A connector that runs several tasks for one stream has several producers, and would need all markers written by one of them, or a separate stream per task.
 4. Transforms run before the converters.
    Where the OpenCDC ordinals and markers are assigned (by the connector, a transform, or the converter) decides which transforms may still filter records.
+
+A sink connector reads the stream through the framework's consumer-group subscription, which delivers records from every subscribed topic interleaved, commits offsets for each, and spreads partitions across tasks.
+That subscription suits the data topics, but not the control topic.
+
+| Kafka Connect sink setting                                        | Disposition                     | Note                                                                                                                           |
+| ----------------------------------------------------------------- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `topics`, `topics.regex`                                          | Mapped with constraint          | Data topics, and the transaction topic where one task assembles transactions; never the control topic (5)                      |
+| Control topic                                                     | Add                             | Each task reads it with its own consumer, assigned rather than subscribed, before `put()` processes data (B-KFK-38, B-KFK-52) (5) |
+| `tasks.max` greater than 1                                        | Mapped with constraint          | Splits a table's partitions across tasks, so transaction assembly needs one task or a repartitioning stage (6)                 |
+
+5. Through the framework subscription, the control topic's offset is committed like any other, so after a restart it resumes where it left off rather than at the beginning, and with more than one task only one task receives its single partition.
+   A task-owned consumer avoids both; `SinkTaskContext.pause()` and `offset()` can approximate it within the subscription, but less simply.
+6. A task that holds only some partitions of a table cannot verify a transaction's completeness, because `distribution` counts events per subject, not per partition.
+   The choices are those of core Appendix B.4: a single reader, a stage that regroups events by `cdcxid`, or per-partition apply as a weaker service level.
 
 ### 7.2. Debezium
 

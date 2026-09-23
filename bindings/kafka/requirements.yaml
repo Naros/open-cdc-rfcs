@@ -61,8 +61,8 @@ requirements:
   level: MUST
   who: Publisher
   section: '1.4'
-  requirement: Each topic MUST carry only the records listed for its role in the Section 1.4 table; a data topic carries OBJECT_METADATA only after a forward-referencing
-    ddl.CREATE.
+  requirement: Each topic MUST carry only the records listed for its role in the Section 1.4 table; DDL events are control-topic records and data topics carry DML,
+    TRUNCATE, snapshot.READ, and permitted tombstones.
 - id: B-KFK-10
   level: MUST
   who: Deployment
@@ -129,8 +129,8 @@ requirements:
   level: MUST
   who: Publisher
   section: '3.4'
-  requirement: A data-topic record key MUST be a deterministic function of subject and, for row events of keyed tables, the primary key values; the JSON-array encoding
-    SHOULD be used.
+  requirement: A data-topic record key MUST be a deterministic function of subject and, for row events of keyed tables, the primary key values (TRUNCATE by subject
+    only); the JSON-array encoding SHOULD be used.
 - id: B-KFK-22
   level: MUST
   who: Publisher
@@ -140,8 +140,8 @@ requirements:
   level: MUST
   who: Publisher
   section: '3.4'
-  requirement: Control-topic keys MUST be opencdc:descriptor, opencdc:stream-metadata, and opencdc:object-metadata:<id>; a TRX_COMMIT key MUST be its cdcxid and a
-    HEARTBEAT record MUST have no key.
+  requirement: Control-topic keys MUST be opencdc:descriptor, opencdc:stream-metadata, opencdc:object-metadata:<id>, and opencdc:ddl:<id>; a TRX_COMMIT key MUST be
+    its cdcxid and a HEARTBEAT record MUST have no key.
 - id: B-KFK-24
   level: MUST
   who: Publisher
@@ -179,8 +179,8 @@ requirements:
   level: MUST
   who: Publisher
   section: '4.1'
-  requirement: The tables declaration MUST equal the union of descriptor subjects, events for a subject MUST appear only on topics listing it, and reconnect coverage
-    MUST be declared as the core requires for a sessionless producer.
+  requirement: The tables declaration MUST equal the union of descriptor subjects, DML, TRUNCATE, and snapshot.READ events for a subject MUST appear only on topics
+    listing it, and reconnect coverage MUST be declared as the core requires for a sessionless producer.
 - id: B-KFK-31
   level: SHOULD
   who: Publisher
@@ -196,14 +196,14 @@ requirements:
   level: MUST
   who: Deployment
   section: '4.2'
-  requirement: (Control-channel retention) The control topic MUST keep the latest descriptor, the latest STREAM_METADATA, and every OBJECT_METADATA version for the
-    life of the stream.
+  requirement: (Control-channel retention) The control topic MUST keep the latest descriptor, the latest STREAM_METADATA, every OBJECT_METADATA version, and every
+    DDL event for the life of the stream.
 - id: B-KFK-34
   level: MUST
   who: Publisher and Deployment
   section: '4.2'
-  requirement: (Schema retention across the replay window) Every schema version stays retrievable, and a data record MUST NOT be written until its OBJECT_METADATA
-    control-topic record is acknowledged, except a forward-referencing ddl.CREATE (B-KFK-59).
+  requirement: (Schema retention across the replay window) Every schema version stays retrievable, and a data-topic record MUST NOT be written until the OBJECT_METADATA
+    its dataschema names is acknowledged on the control topic.
 - id: B-KFK-35
   level: MUST
   who: Deployment
@@ -254,7 +254,8 @@ requirements:
   level: MUST
   who: Publisher
   section: '5.4'
-  requirement: A TRX_COMMIT MUST be written after its transaction's events and in source commit order, and MUST NOT become visible before its data records are acknowledged.
+  requirement: A TRX_COMMIT MUST be written after its transaction's events (data topics, and the control topic for DDL) and in source commit order, and MUST NOT become
+    visible before those records are acknowledged.
 - id: B-KFK-44
   level: MUST
   who: Publisher
@@ -345,8 +346,8 @@ requirements:
   level: MUST
   who: Publisher
   section: '5.3'
-  requirement: After a forward-referencing ddl.CREATE the publisher MUST write the named OBJECT_METADATA to the same data partition and to the control topic, both
-    acknowledged before the subject's first DML or snapshot.READ.
+  requirement: After a forward-referencing ddl.CREATE the publisher MUST write the named OBJECT_METADATA to the control topic, both acknowledged before the subject's
+    first DML or snapshot.READ.
 - id: B-KFK-60
   level: MUST
   who: Publisher
@@ -370,3 +371,9 @@ requirements:
   section: '5.5'
   requirement: On a compacted data topic a client MUST treat records older than replayWindow as table state, MUST NOT expect their transactions or markers to be complete,
     and MUST expect cdctxorder gaps among them.
+- id: B-KFK-64
+  level: MUST
+  who: Client
+  section: '5.4'
+  requirement: A client assembling transactions MUST include control-topic DDL events by cdcxid and cdctxorder, and MUST NOT process as a new change a DDL event whose
+    TRX_COMMIT precedes its transaction-topic start position.

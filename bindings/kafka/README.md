@@ -173,9 +173,9 @@ Only the region beyond the window changes, from nothing to table state.
 
 | Topic role  | Partitions | `cleanup.policy` | Records                                                                  | Record key (3.4)                          |
 | ----------- | ---------- | ---------------- | ------------------------------------------------------------------------ | ----------------------------------------- |
-| Control     | 1          | `compact`        | Stream descriptor; STREAM_METADATA; durable OBJECT_METADATA              | Fixed per record kind (B-KFK-23)          |
+| Control     | 1          | `compact`        | Stream descriptor; STREAM_METADATA; durable OBJECT_METADATA; `ddl.*`     | Fixed per record kind (B-KFK-23)          |
 | Transaction | 1          | `delete`         | TRX_COMMIT; HEARTBEAT                                                    | `cdcxid` for TRX_COMMIT; none for HEARTBEAT |
-| Data        | Fixed, 1 or more | `delete`, or compaction with a lag (B-KFK-7) | `dml.*` (including TRUNCATE), `ddl.*`, `snapshot.READ`; OBJECT_METADATA only after a `ddl.CREATE` (B-KFK-59); tombstones on compacted topics (B-KFK-62) | Row identity, or the subject (B-KFK-21)   |
+| Data        | Fixed, 1 or more | `delete`, or compaction with a lag (B-KFK-7) | `dml.*` (including TRUNCATE), `snapshot.READ`; tombstones on compacted topics (B-KFK-62) | Row identity, or the subject (B-KFK-21)   |
 
 *Why a transaction topic with one partition.* Data events are spread over many partitions and lose their cross-partition order.
 The transaction topic restores it: because it has one partition, one writer (B-KFK-60), and the publisher writes markers in commit order (B-KFK-43), the sequence of TRX_COMMIT records on it, after deduplication by `(source, id)`, is the source commit order of the stream.
@@ -380,27 +380,27 @@ The rules below keep every change to one row in one partition, which is what per
 | -------------------------------------------------------------- | --------------------------------------------------- |
 | `dml.INSERT`, `dml.UPDATE`, `dml.UPSERT`, `snapshot.READ`      | `subject` and the primary key values of `after`     |
 | `dml.DELETE`                                                   | `subject` and the primary key values of `before`    |
-| `dml.TRUNCATE`, `ddl.*`                                        | `subject` only                                      |
+| `dml.TRUNCATE`                                                 | `subject` only                                      |
 | Any row event of a table with an empty `primary_key`           | `subject` only                                      |
 
   The key SHOULD be the UTF-8 JSON text of an array whose first element is the `subject` and whose remaining elements are the primary key values in `primary_key` order, in their wire encoding, with no insignificant whitespace: `["FINANCE.ORDERS",1001]`.
 
 - **B-KFK-22.** The partition of a data-topic record MUST be a deterministic function of its key and the topic's partition count, and the function MUST NOT change for the life of the stream.
   Records with equal keys on one topic MUST be written to the same partition.
-- **B-KFK-23.** On the control topic the key MUST be `opencdc:descriptor` for the stream descriptor, `opencdc:stream-metadata` for STREAM_METADATA, and `opencdc:object-metadata:` followed by the event `id` for OBJECT_METADATA.
+- **B-KFK-23.** On the control topic the key MUST be `opencdc:descriptor` for the stream descriptor, `opencdc:stream-metadata` for STREAM_METADATA, `opencdc:object-metadata:` followed by the event `id` for OBJECT_METADATA, and `opencdc:ddl:` followed by the event `id` for a `ddl.*` event.
   On the transaction topic the key of a TRX_COMMIT record MUST be its `cdcxid`, and a HEARTBEAT record MUST have no key.
 - **B-KFK-24.** The event's `partitionkey` attribute, when present, is carried unchanged ([CloudEvents Kafka binding section 3.1][ce-kafka-key]).
   A publisher MUST NOT use it as the record key unless doing so satisfies B-KFK-21.
 
-*Why OBJECT_METADATA is keyed by `id`.* Each schema version has its own CloudEvents `id`, and a re-emission of an unchanged version repeats it.
-Keying by `id` means compaction never removes a version (4.2), while repeated emissions of the same version collapse to one record.
+*Why OBJECT_METADATA and DDL events are keyed by `id`.* Each schema version has its own CloudEvents `id`, and a re-emission of an unchanged version repeats it.
+Keying by `id` means compaction never removes a version or a DDL event (4.2), while repeated emissions of the same event collapse to one record.
 
 *Why the key is not the transaction.* Core P-ORD-6 suggests giving all events of a transaction one `partitionkey`.
 On Kafka that places a row's changes in different partitions whenever they fall in different transactions, which loses per-row order.
 This binding keys by row instead and restores transaction structure from `cdcxid` and the transaction topic (Section 8, deferred core item 4).
 
 *Note.* An UPDATE that changes a primary key is keyed by its new key, so it can land in a different partition from earlier changes to the same row.
-Likewise TRUNCATE and `ddl.*` events are keyed by subject alone and land in one partition, apart from the table's row events.
+Likewise a TRUNCATE is keyed by subject alone and lands in one partition, apart from the table's row events, and DDL events are on the control topic (B-KFK-9).
 A client applying partitions independently can then apply such an event before earlier changes it should follow.
 A client that orders transactions by the transaction topic (5.4) is unaffected.
 This is the same hazard Debezium avoids by emitting a DELETE and a CREATE for a key change; OpenCDC keeps the single UPDATE.
@@ -455,13 +455,13 @@ The publisher emits STREAM_METADATA as usual ([core Section 10.4][core-10-4]); t
 | `schema_delivery.schema_by_reference`  | Producer-declared                               | A schema registry is a supplement; `cdcschemauri` never replaces the control topic ([core Section 4.4][core-4-4]) |
 | `sequence_continuity`                  | Producer-declared                               | Describes `pos.lsn`, not Kafka offsets                                                                |
 | `transaction_visibility`               | `"committed_only"`                              | Core default                                                                                          |
-| `ddl_capture`                          | Producer-declared                               | DDL events are data-topic records (B-KFK-9)                                                           |
+| `ddl_capture`                          | Producer-declared                               | DDL events are control-topic records (B-KFK-9)                                                        |
 | `tables`                               | Every captured table of *this stream*           | Equals the union of the descriptor's data-topic `subjects` (B-KFK-30)                                 |
 
 - **B-KFK-28.** STREAM_METADATA MUST declare `session_aware: false` or omit it.
 - **B-KFK-29.** STREAM_METADATA MUST declare `transaction_boundaries: "commit_all"` and `transaction_marker_delivery: "transaction_metadata_channel"`, and the publisher MUST emit a TRX_COMMIT for every transaction, whatever `transaction_interleaving` it declares.
   This realizes P-TRX-7 as a requirement: a client of a partitioned stream cannot prove completion of any transaction, single-event or not, without a marker.
-- **B-KFK-30.** The `tables` declaration MUST equal the union of the `subjects` of the descriptor's data topics, and events for a subject MUST appear only on data topics that list it.
+- **B-KFK-30.** The `tables` declaration MUST equal the union of the `subjects` of the descriptor's data topics, and DML, TRUNCATE, and `snapshot.READ` events for a subject MUST appear only on data topics that list it.
   Reconnect coverage MUST be declared as the core requires for a sessionless producer (P-SCHEMA-2, P-SCHEMA-4): where the core permits `schema_on_reconnect: true` with `session_aware: false`, the control topic is the durable control channel that realizes it; where it does not, `schema_on_each_event: true` is required.
 - **B-KFK-31.** A publisher that assigns events to topics and partitions within the producing process SHOULD declare `ordering_scope: "channel"`.
   Its emission channels are then the partitions, the emission declaration and the delivered stream describe the same channels, and the core permits the control topic to carry reconnect coverage (Section 8, deferred core item 2).
@@ -476,11 +476,11 @@ A single-partition profile that would preserve `ordering_scope: "stream"` end to
 - **B-KFK-32 (Ordering preservation).** Within each partition of each topic, the publisher MUST write records in the producer's emitted order.
   The publisher MUST configure its Kafka producer so that retries cannot reorder records within a partition: `enable.idempotence=true`, or `max.in.flight.requests.per.connection=1`.
   Events written to the transaction topic are therefore in emitted order, which for TRX_COMMIT is source commit order (P-ORD-1).
-- **B-KFK-33 (Control-channel retention).** The deployment MUST keep, on the control topic, the latest stream descriptor, the latest STREAM_METADATA, and every OBJECT_METADATA version the publisher has written, for the life of the stream.
+- **B-KFK-33 (Control-channel retention).** The deployment MUST keep, on the control topic, the latest stream descriptor, the latest STREAM_METADATA, every OBJECT_METADATA version, and every DDL event the publisher has written, for the life of the stream.
   With `cleanup.policy=compact`, the keys of B-KFK-23, and no tombstones (B-KFK-25), compaction removes only superseded descriptors and superseded STREAM_METADATA.
 - **B-KFK-34 (Schema retention across the replay window).** Because the control topic never removes a schema version, every OBJECT_METADATA version that governs a retained data event remains retrievable, which realizes R-POS-7 for the whole replay window.
-  In addition, the publisher MUST NOT write a data record whose `dataschema` names an OBJECT_METADATA version until that version's control-topic record has been acknowledged by the cluster, with one exception: a `ddl.CREATE` whose `dataschema` is a forward reference ([core Section 9.1][core-9-1]) precedes its OBJECT_METADATA, as the core requires, and is governed by B-KFK-59.
-  A client that sees any other data event can therefore always find its schema on the control topic (5.3).
+  In addition, the publisher MUST NOT write a record to a data topic whose `dataschema` names an OBJECT_METADATA version until that version's control-topic record has been acknowledged by the cluster.
+  A client that sees a data-topic event can therefore always find its schema on the control topic (5.3).
 - **B-KFK-35 (Marker retention parity).** The deployment MUST set `retention.bytes=-1` on the transaction topic and on every data topic.
   It MUST set the transaction topic's `retention.ms` greater than the maximum, over the data topics, of the topic's replay horizon plus `segment.ms` plus the broker's `log.retention.check.interval.ms`, where a data topic's replay horizon is its `min.compaction.lag.ms` if compaction is enabled and its `retention.ms` otherwise.
   If any data topic with `cleanup.policy=delete` has `retention.ms=-1`, the transaction topic MUST as well.
@@ -538,22 +538,26 @@ How a consumer treats that boundary is consumer guidance ([core Appendix A.7][co
 - **B-KFK-42 (Client).** When a client reads a data event whose `dataschema` is not in its schema cache, it MUST read the control topic to its current end before treating the event as undecodable.
   Under B-KFK-34 the schema is on the control topic by the time the data record exists; a miss is a race between independently progressing partitions, not corruption ([core Appendix A.2][core-a2]).
 
-- **B-KFK-59.** When the publisher writes a `ddl.CREATE` whose `dataschema` is a forward reference, it MUST write the named OBJECT_METADATA to the same data-topic partition immediately after the CREATE, keyed like the CREATE (the subject), and to the control topic; both copies MUST be acknowledged before the subject's first DML or `snapshot.READ` record is written.
-  This is the only OBJECT_METADATA a data topic carries.
-  It satisfies the core's rule that under `ordering_scope: "channel"` the CREATE and its governing OBJECT_METADATA are emitted on the same emission channel, and that the OBJECT_METADATA follows the DDL event ([core Section 4.1][core-4-1]).
+- **B-KFK-59.** When the publisher writes a `ddl.CREATE` whose `dataschema` is a forward reference ([core Section 9.1][core-9-1]), it MUST write the named OBJECT_METADATA to the control topic after the CREATE, and both MUST be acknowledged before the subject's first DML or `snapshot.READ` record is written.
+  Because DDL events and OBJECT_METADATA share the control topic's single partition, the CREATE and its governing OBJECT_METADATA are on one channel with the OBJECT_METADATA following, as the core requires ([core Section 4.1][core-4-1]).
 
-A client that meets a forward-referencing `ddl.CREATE` buffers it until the named OBJECT_METADATA arrives, which it does next on the same partition ([core Appendix A.2][core-a2]); that case is not a miss under B-KFK-42.
+A client that meets a forward-referencing `ddl.CREATE` buffers it until the named OBJECT_METADATA arrives, which it does later on the control topic ([core Appendix A.2][core-a2]); that case is not a miss under B-KFK-42.
 
 A client that keeps consuming the control topic for the life of its session (B-KFK-52) rarely meets this case.
 Schema versions are cached by `id`, never overwritten by table, so that a replayed position resolves its governing version.
 
 ### 5.4. Transaction Completion and the Transaction Topic
 
-- **B-KFK-43.** The publisher MUST write a transaction's TRX_COMMIT to the transaction topic after all of that transaction's events have been written to data topics, and in source commit order relative to every other TRX_COMMIT.
-  It MUST NOT let a TRX_COMMIT become visible to clients before all of the transaction's data records are acknowledged, either by waiting for their acknowledgements before sending the marker or by writing the transaction's records and its marker in one Kafka transaction (visible to `read_committed` clients only on commit).
+- **B-KFK-43.** The publisher MUST write a transaction's TRX_COMMIT to the transaction topic after all of that transaction's events have been written to data topics and, for DDL events, the control topic, and in source commit order relative to every other TRX_COMMIT.
+  It MUST NOT let a TRX_COMMIT become visible to clients before all of the transaction's event records are acknowledged, either by waiting for their acknowledgements before sending the marker or by writing the transaction's records and its marker in one Kafka transaction (visible to `read_committed` clients only on commit).
   Asynchronous sends to different partitions complete in any order, so writing the marker last is not by itself enough.
 - **B-KFK-61 (Client).** A client MUST NOT commit a transaction-topic offset past a TRX_COMMIT until it has finished processing that transaction.
   Offsets are committed per partition; committing the marker's offset while the transaction's data offsets are behind would lose the marker on resume, against R-POS-6 ([core Section 10.5.4][core-10-5-4]).
+- **B-KFK-64 (Client).** A client assembling transactions MUST include the DDL events on the control topic, matched by `cdcxid` and counted by `cdctxorder` toward `event_count` like any other event.
+  A DDL event whose transaction's TRX_COMMIT precedes the client's start position on the transaction topic is outside the range the client is consuming, and the client MUST NOT process it as a new change.
+
+*Note.* A client reads the whole control topic at startup (B-KFK-38), so it sees DDL events from before its start position; the transaction topic tells it which of them are in range.
+The control topic grows with every DDL event, including the statement text under `ddl_capture: "verbatim"`, and startup reads all of it; pruning is deferred (Section 8).
 - **B-KFK-44.** Any filtering the publisher applies (by table, operation, column value, or any other criterion) MUST take effect before `cdctxorder` values are assigned and before TRX_COMMIT `event_count` and `distribution` are computed.
   `cdctxorder` MUST be dense over the events published, and `event_count` and `distribution` MUST describe exactly those events.
   A transaction none of whose events is published produces no TRX_COMMIT.
@@ -741,7 +745,8 @@ Rows rest on the public documentation only; a *verified* column will be added on
 | `provide.transaction.metadata`                                    | Converted                       | Debezium `END` records map to TRX_COMMIT; `BEGIN` records have no OpenCDC counterpart (5)                                      |
 | `topic.transaction` (`<prefix>.transaction`)                      | Mapped                          | Transaction topic; must have one partition (B-KFK-6) and hold HEARTBEAT (B-KFK-49)                                             |
 | `heartbeat.interval.ms`, `topic.heartbeat.prefix`                 | Converted                       | Debezium heartbeats are source-offset keep-alives on their own topic; OpenCDC HEARTBEAT goes to the transaction topic (B-KFK-49) |
-| Schema history topic, `include.schema.changes` (log-based connectors that keep one) | Out of scope, and add | Internal DDL history is not OBJECT_METADATA; the control topic must be added (B-KFK-33) (6)                     |
+| Schema history topic (log-based connectors that keep one)        | Out of scope, and add           | Internal DDL history is not OBJECT_METADATA; the control topic must be added (B-KFK-33) (6)                                    |
+| `include.schema.changes` (schema change topic)                    | Mapped                          | Like Debezium's schema change topic, DDL events stay off data topics; they go to the control topic (B-KFK-9)                   |
 | `decimal.handling.mode=double`                                    | Excluded                        | Loses precision (P-TYPE-4)                                                                                                     |
 | `time.precision.mode`, `binary.handling.mode`                     | Converted                       | Wire encoding follows the type system's `logical_type`, whatever the Debezium representation                                   |
 | `column.exclude.list`, `table.include.list`                       | Mapped                          | Define the emission schema and captured tables; OBJECT_METADATA follows changes (core Section 4.1)                              |
@@ -783,7 +788,7 @@ None is ratified; each is a place where this draft made a call so that review ha
 2. One profile: partitioned delivery.
    The delivered guarantee is order per partition, with transaction commit order recovered from the transaction topic (4.2).
    A single-partition profile that preserves a total order is deferred rather than half-specified.
-3. Topic layout of one control topic, one transaction topic, and data topics (1.4); OBJECT_METADATA only on the control topic; HEARTBEAT only on the transaction topic.
+3. Topic layout of one control topic, one transaction topic, and data topics (1.4); OBJECT_METADATA and DDL events only on the control topic; HEARTBEAT only on the transaction topic.
 4. Records are keyed by row identity, not by transaction, departing from the P-ORD-6 suggestion for this transport (3.4).
 5. Deployment declarations live in a stream descriptor record on the control topic rather than in headers on STREAM_METADATA (6.2).
    The alternative is the one core Appendix B.3 mentions first; the working group should choose.
@@ -796,6 +801,8 @@ None is ratified; each is a place where this draft made a call so that review ha
 9. Revised before first circulation after a drafting review, which found and fixed: descriptor misread as a binary-mode CloudEvent (B-KFK-2, B-KFK-3); `ddl.CREATE` forward references against core Section 9.1 (B-KFK-34, B-KFK-59); durability weaker than core Section 15.1 (B-KFK-46); no single writer for the transaction topic (B-KFK-60); marker visibility only SHOULD (B-KFK-43); markers lost by early offset commits (B-KFK-61); relay mode conversion, ACL coverage, size headroom, and HEARTBEAT wording (B-KFK-36, B-KFK-13, B-KFK-27, 5.7).
 10. Data-topic compaction is admitted, with `min.compaction.lag.ms` at least the replay window (B-KFK-7, B-KFK-62, B-KFK-63).
     The first draft forbade it outright; that was revised on 23 September 2026 after review, because compacted change topics are common practice as table-state sources and compaction beyond the window does not affect any replayable event.
+11. DDL events are carried on the control topic, not on data topics (B-KFK-9, B-KFK-59, B-KFK-64), revised on 23 September 2026 after review.
+    Core Section 2.5 permits DDL on a channel separate from DML, subject-keyed DDL had no order against a table's other partitions anyway, and the single-partition control topic keeps each `ddl.CREATE` on one channel with its OBJECT_METADATA without copying schema onto data topics.
 
 ### 8.2. Deferred Features
 
@@ -807,7 +814,7 @@ Not in this revision; each would be a document revision, not a wire change:
 3. **Format composition** (Avro, Protocol Buffers), including schema-registry serializers.
 4. **AsyncAPI template** with Kafka channel bindings and an `x-opencdc` extension equivalent to the descriptor.
 5. **HEARTBEAT on data topics**, for per-partition liveness.
-6. **Schema pruning.** Removing OBJECT_METADATA versions that no retained data event needs, with the tombstone rules that would allow it (R-POS-7).
+6. **Schema and DDL pruning.** Removing OBJECT_METADATA versions and DDL events that no retained data event needs, with the tombstone rules that would allow it (R-POS-7).
 
 ### 8.3. Deferred Core Items
 

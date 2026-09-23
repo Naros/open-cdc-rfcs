@@ -762,7 +762,7 @@ An AsyncAPI template for this binding, analogous to the WSS + AsyncAPI binding's
 This section is informative.
 It records how existing implementations relate to this binding, chiefly from their published documentation: 7.1 covers the Kafka Connect runtime, which many CDC connectors share, 7.2 covers Debezium, a set of source connectors that runs on it, and 7.3 covers publishers that create their own Kafka producer.
 It is not an implementation plan and does not assert that any option, as documented, produces OpenCDC-conformant output.
-Rows rest on the public documentation, except where a note records a fact read from an implementation's source code, which the note says, and which is to be verified against captured output (Section 8, open item 9); a *verified* column will be added once captured records are analysed (Section 8, open item 5).
+Rows rest on the public documentation, except where a note records a fact read from an implementation's source code, which the note says, and which is to be verified against captured output (Section 8, open items 5 and 9); a *verified* column will be added once captured records are analysed (Section 8, open item 5).
 
 "Fixed" means the binding requires a specific value; "excluded" means the option produces a stream that is not OpenCDC-conformant, or a deployment that does not satisfy this binding, and so cannot be claimed; "out of scope" means a provisioning or producer-internal concern the binding does not see; "converted" means a semantic mapping the publisher must implement, not a rename; "add" means a capability the implementation does not document.
 
@@ -840,7 +840,7 @@ Runtime settings are in 7.1, and for Debezium Server in 7.3.
 | `topic.transaction` (`<prefix>.transaction`)                      | Mapped                          | Transaction topic; must have one partition (B-KFK-6) and hold HEARTBEAT (B-KFK-49)                                             |
 | `heartbeat.interval.ms`, `topic.heartbeat.prefix`                 | Converted                       | Debezium heartbeats are source-offset keep-alives on their own topic; OpenCDC HEARTBEAT goes to the transaction topic (B-KFK-49) |
 | Schema history topic (log-based connectors that keep one)        | Out of scope, and add           | Internal DDL history is not OBJECT_METADATA; the control topic must be added (B-KFK-33) (6)                                    |
-| `include.schema.changes` (schema change topic)                    | Mapped                          | Like Debezium's schema change topic, DDL events stay off data topics; they go to the control topic (B-KFK-9)                   |
+| `include.schema.changes` (schema change topic)                    | Mapped with constraint          | DDL events go to the control topic, not a data topic (B-KFK-9), which keeps every one for the life of the stream (B-KFK-33); `false` means `ddl_capture: "none"` (8); with `true` the publisher writes as `ddl.*` only events that record a source DDL operation (9, 11) and declares `ddl_capture` from the text they carry (10) |
 | `decimal.handling.mode=double`                                    | Excluded                        | Loses precision (P-TYPE-4)                                                                                                     |
 | `time.precision.mode`, `binary.handling.mode`                     | Converted                       | Wire encoding follows the type system's `logical_type`, whatever the Debezium representation                                   |
 | `column.exclude.list`, `table.include.list`                       | Mapped                          | Define the emission schema and captured tables; OBJECT_METADATA follows changes (core Section 4.1)                              |
@@ -864,6 +864,17 @@ Notes:
 6. Schema history topics store DDL for the connector's own recovery and are not intended for clients.
    The binding's control topic is a different artifact: it carries OBJECT_METADATA for clients, retains every version, and is required.
 7. Skipping `u` (updates) while keeping inserts and deletes yields a stream that is conformant over what it emits but is not a faithful changelog; see the WSS + AsyncAPI binding's Section 5.7 and its deferred core item 4.
+8. `false` stops the schema change topic entirely, including events for genuine source DDL, so the stream declares `ddl_capture: "none"`.
+   It does not stop the internal schema history of the row above, which the connector keeps for its own recovery and which still needs the DDL its source records.
+9. Some connectors write a schema change event for each captured table at snapshot start, to seed their schema tracking, without marking it as such.
+   It records no source DDL operation, so it is not written as `ddl.*`, whatever `ddl_capture` is declared (core P-DDL-2).
+   This is read from the connector source, not the documentation, and is to be verified against captured output (Section 8, open item 5).
+10. `true` alone does not determine `ddl_capture`: some connectors carry no DDL at all, some carry events without statement text, and some reconstruct statement text from current metadata or rewrite one statement form into another.
+    Reconstructed text is not verbatim (core 8.1), and `ddl_capture` is declared for the whole stream, so a stream that may carry reconstructed text declares `"structural"`, carrying no statement text, or `"none"`, carrying statement text only where it is the source's own; it does not declare `"verbatim"`.
+    This is read from the connector source, not the documentation, and is to be verified against captured output (Section 8, open item 5).
+11. Some connectors also write a reconstructed CREATE when they first meet a table they had not tracked, and whether that records a source DDL operation is unresolved.
+    Until it is resolved, such an event is not written as `ddl.*` unless the publisher can attribute it to a source DDL operation (core P-DDL-2).
+    This is read from the connector source, not the documentation, and is to be verified against captured output (Section 8, open item 5).
 
 ### 7.3. Publishers Outside Kafka Connect
 
@@ -989,6 +1000,11 @@ Recorded so they are not lost:
     Any remediation, such as reconciling against the source or re-snapshotting a table, is an operator act outside the stream; the declaration tells the operator whether it is needed, and does not let a client request it.
     A declaration would state the producer's configuration, not completeness: the 3.5 note holds whatever the declared value.
     A producer can also be configured to suppress other operation classes (B-KFK-44, 7.2 note 7); whether one declaration should cover them is for the core working group.
+11. **DDL events that record no source operation, and reconstructed statement text.** Some connectors emit schema change records that only seed their schema tracking at snapshot start, or that reconstruct a table's definition when they first meet a table they had not tracked, without marking either as such (7.2 notes 9 and 11).
+    P-DDL-2 forbids a `ddl.*` event for a change that did not occur as a source DDL operation; the core should say explicitly that seeding records are excluded, and whether a definition reconstructed on first encounter records a source DDL operation.
+    Separately, some source DDL operations reach a producer only with reconstructed or rewritten statement text (7.2 note 10).
+    Under `ddl_capture: "verbatim"` the core allows no event without the source's own text, so a producer that cannot always supply it must declare `"structural"`, giving up statement text for every event, or `"none"`, giving up the coverage floor (P-DDL-1).
+    The core should decide whether to allow a per-event structural shape under `"verbatim"`, or to confirm that such a producer declares `"structural"`; consumers that audit or replay DDL rely on every `"verbatim"` event carrying source text.
 
 ### 8.4. Open Items
 
@@ -1004,6 +1020,10 @@ Recorded so they are not lost:
    A client rule comparing positions, and TRUNCATE on the transaction topic with retention for the life of the stream, were considered and not adopted; tombstoning every key of the table was rejected, because log-based capture records no row keys for a TRUNCATE.
 9. **Publishers outside Kafka Connect.** Record further publishers in 7.3, each from its own published documentation, including replication engines with their own Kafka target or handler and any that reuse Kafka Connect converters without running on a Connect worker.
    For Debezium Server, verify against captured output (a) whether a marker sent in the same producer batch as its transaction's records can become visible before they are acknowledged (B-KFK-43), (b) that the connector's offset advances only after `wait.message.delivery.timeout.ms` completes (B-KFK-47), and (c) that `debezium.format.value=cloudevents` produces the mapping of 7.2 (7.3 notes 6 to 8).
+10. **Separate DDL topic.** Whether to move `ddl.*` events from the control topic to a fourth topic role, a DDL topic with `cleanup.policy=delete` and the data topics' retention.
+    Clients need DDL events only within the replay window, to assemble transactions (B-KFK-64), so a DDL topic would bound the control topic's growth and startup read to STREAM_METADATA and schema versions, and would let DDL statement text under `ddl_capture: "verbatim"` have its own ACLs (B-KFK-14).
+    It is not adopted because the core requires a forward-referencing `ddl.CREATE` and its governing OBJECT_METADATA to be emitted on the same emission channel under `ordering_scope: "channel"` ([core Section 9.1][core-9-1]), which B-KFK-59 meets through the control topic's single partition.
+    Adopting it needs that core rule relaxed, or OBJECT_METADATA admitted before its CREATE, and would change B-KFK-4, B-KFK-9, B-KFK-23, B-KFK-33, B-KFK-59, B-KFK-64, and 4.2; it is an alternative to the pruning in 8.2, item 6, for DDL events.
 
 ## 9. References
 

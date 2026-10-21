@@ -393,7 +393,8 @@ requirements:
   level: MUST
   who: Client
   section: '6.1'
-  requirement: A client MUST read the stream's control topic and transaction topic, and the data topic of every subject whose events it processes.
+  requirement: A client MUST read the stream's control topic and transaction topic, and the data topic of every subject whose events it processes; a client that
+    processes only some subjects verifies its events per subject, data topic and control topic, against distribution (B-KFK-71) and cannot reconstruct the whole transaction.
 - id: B-KFK-67
   level: MUST
   who: Deployment
@@ -419,3 +420,9 @@ requirements:
   who: Client
   section: '5.8'
   requirement: A client SHOULD stop consuming the stream if it observes that a stream topic's partition count has changed (B-KFK-51).
+- id: B-KFK-71
+  level: MUST
+  who: Publisher
+  section: '5.4'
+  requirement: Every TRX_COMMIT MUST carry distribution, keyed by the exact subject of the published events, DDL events included, each value the number of distinct
+    cdctxorder ordinals published for that subject, summing to event_count.

@@ -681,10 +681,12 @@ The control topic grows with every DDL event, including the statement text under
 - **B-KFK-44.** Any filtering the publisher applies (by table, operation, column value, or any other criterion) MUST take effect before `cdctxorder` values are assigned and before TRX_COMMIT `event_count` and `distribution` are computed.
   `cdctxorder` MUST be dense over the events published, and `event_count` and `distribution` MUST describe exactly those events.
   A transaction none of whose DML or DDL events is published produces no TRX_COMMIT (B-KFK-29).
+- **B-KFK-71.** Every TRX_COMMIT MUST carry `distribution`, keyed by the exact `subject` attribute of the published events counted in `event_count`, DDL events included under their own `subject` (B-KFK-64), with each value the number of distinct `cdctxorder` ordinals published for that subject, so that the values sum to `event_count` (P-TRX-4).
+  The core makes `distribution` a SHOULD ([core Section 10.5.3][core-10-5-3]); this binding requires it, as B-KFK-29 does for P-TRX-7, because a client that processes only some subjects cannot otherwise verify that it holds their events.
 - **B-KFK-69 (Client).** A client that reads a TRX_COMMIT whose `event_count` is 0, which a conformant publisher does not emit (B-KFK-29), MUST treat it as the marker of a complete transaction with no events, and MAY apply the B-KFK-61 offset commit on its account.
 
 *Note.* OpenCDC defines no event that announces a transaction before its data (`TRX_BEGIN` and `TRX_ABORT` are reserved type names in the core, not specified), so a client learns that a transaction started only from its events; if a transaction has no published events, a TRX_COMMIT for it is irrelevant.
-If a later core revision specifies `TRX_BEGIN`, every TRX_COMMIT rule of this binding (B-KFK-29, B-KFK-43, B-KFK-44, B-KFK-47, B-KFK-48, B-KFK-61, B-KFK-64, B-KFK-69) is to be re-evaluated, starting with whether an announced transaction with no published event needs a closing marker.
+If a later core revision specifies `TRX_BEGIN`, every TRX_COMMIT rule of this binding (B-KFK-29, B-KFK-43, B-KFK-44, B-KFK-47, B-KFK-48, B-KFK-61, B-KFK-64, B-KFK-69, B-KFK-71) is to be re-evaluated, starting with whether an announced transaction with no published event needs a closing marker.
 
 | B-KFK-43 option           | TRX_COMMIT is written                                                  | `read_committed` client                                                          | `read_uncommitted` client | Producer instances |
 |---------------------------|------------------------------------------------------------------------|----------------------------------------------------------------------------------|---------------------------|--------------------|
@@ -771,7 +773,7 @@ A data partition that receives nothing for a long time is normal; a transaction 
 - **B-KFK-70 (Client).** A client SHOULD stop consuming the stream if it observes that a stream topic's partition count has changed (B-KFK-51).
   A client that subscribes observes the change only if a new partition is assigned to it, as a partition it has not held before and holds no position for (B-KFK-40); one that assigns partitions itself observes it only by comparing topic metadata with the partition count it holds.
 
-A client that reads only some tables is configured with those tables' data topics and reads the transaction topic in full.
+A client that reads only some tables is configured with those tables' data topics and reads the control and transaction topics in full (B-KFK-66).
 When a TRX_COMMIT's `distribution` names a subject the client processes but has no topic for, its configuration is incomplete.
 A client configured with a topic pattern (for example Kafka Connect `topics.regex`) picks up a new subject's topic without reconfiguration.
 
@@ -818,7 +820,8 @@ The content mode is carried on every record (B-KFK-3), and every event carries i
 - **B-KFK-55.** The address of a stream is the bootstrap servers of its Kafka cluster and the names of its control topic, its transaction topic, and its data topics, or a pattern that matches them.
   Whoever operates a claimed stream deployment MUST make the address available to authorized clients; how it does so (configuration, a catalog, an AsyncAPI document) is not specified.
 - **B-KFK-66 (Client).** A client MUST read the stream's control topic and transaction topic, and the data topic of every subject whose events it processes.
-  A client that processes only some subjects checks transaction completeness for those subjects with `distribution` ([core Appendix A.10][core-a10]).
+  A client that processes only some subjects verifies that it holds every event of a transaction for those subjects by counting, per subject, the distinct `cdctxorder` ordinals it has read from that subject's data topic and from the control topic against `distribution` (B-KFK-71), not by holding every ordinal `0..event_count-1` ([core Appendix A.10][core-a10]).
+  It cannot reconstruct the transaction as a whole, order events of different subjects within it, or apply it atomically with subjects other clients read; the order of transactions is the commit order of their markers on the transaction topic (B-KFK-6, B-KFK-43, B-KFK-60).
 - **B-KFK-65 (Deployment).** The deployment MUST grant `Describe` and `DescribeConfigs` on every stream topic to each principal authorized to read the stream, so that a client can read partition counts, `cleanup.policy`, `retention.ms`, `min.compaction.lag.ms`, and `max.message.bytes` from Kafka.
 - **B-KFK-56.** *Withdrawn.* It governed the stream descriptor, which was removed (Section 8, decision 15).
 - **B-KFK-57.** *Withdrawn.* It governed the stream descriptor, which was removed (Section 8, decision 15).
@@ -1172,6 +1175,7 @@ Recorded so they are not lost:
 [core-9-2]: https://github.com/open-cdc-hq/open-cdc-spec/blob/main/spec/OpenCDC-Specification.md#92-truncate
 [core-10-1]: https://github.com/open-cdc-hq/open-cdc-spec/blob/main/spec/OpenCDC-Specification.md#101-heartbeat
 [core-10-4]: https://github.com/open-cdc-hq/open-cdc-spec/blob/main/spec/OpenCDC-Specification.md#104-stream_metadata
+[core-10-5-3]: https://github.com/open-cdc-hq/open-cdc-spec/blob/main/spec/OpenCDC-Specification.md#1053-payload
 [core-10-5-4]: https://github.com/open-cdc-hq/open-cdc-spec/blob/main/spec/OpenCDC-Specification.md#1054-layering-and-replay
 [core-12]: https://github.com/open-cdc-hq/open-cdc-spec/blob/main/spec/OpenCDC-Specification.md#12-transport-bindings
 [core-14-1]: https://github.com/open-cdc-hq/open-cdc-spec/blob/main/spec/OpenCDC-Specification.md#141-producer-security-rules-normative

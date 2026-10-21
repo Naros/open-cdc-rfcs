@@ -894,11 +894,16 @@ That subscription suits the data topics, but not the control topic.
 | `topics`, `topics.regex`                                          | Mapped with constraint          | Data topics, and the transaction topic where one task assembles transactions; never the control topic (5)                      |
 | Control topic                                                     | Add                             | Each task reads it with its own consumer, assigned rather than subscribed, before `put()` processes data (B-KFK-38, B-KFK-52) (5) |
 | `tasks.max` greater than 1                                        | Mapped with constraint          | Splits a table's partitions across tasks, so transaction assembly needs one task or a repartitioning stage (6)                 |
+| `consumer.override.auto.offset.reset`, the group's initial offsets | Mapped with constraint          | The worker sets `earliest`; B-KFK-40 needs `none`, which a connector sets where the worker's override policy permits it, with offsets committed for the connector's group on every partition before it first starts (7) |
 
 5. Through the framework subscription, the control topic's offset is committed like any other, so after a restart it resumes where it left off rather than at the beginning, and with more than one task only one task receives its single partition.
    A task-owned consumer avoids both; `SinkTaskContext.pause()` and `offset()` can approximate it within the subscription, but less simply.
 6. A task that holds only some partitions of a table cannot verify a transaction's completeness, because `distribution` counts events per subject, not per partition.
    The choices are those of core Appendix B.4: a single reader, a stage that regroups events by `cdcxid`, or per-partition apply as a weaker service level.
+7. The worker reads each assigned partition's position before the task can seek, so with `none` a partition that has no committed offset fails the task.
+   A sink connector therefore sets its initial positions by committing offsets for its group (`connect-<connector name>` by default) before the first start, for example with the `kafka-consumer-groups` tool or, with the connector created stopped or stopped before its first run, the Connect REST API's offsets endpoint ([KIP-875][kip-875]).
+   A committed offset that is no longer valid likewise fails the task rather than repositioning it, which is the gap B-KFK-40 requires to be surfaced.
+   This is read from the Kafka Connect source (`Worker`, `WorkerSinkTask`), not the published documentation.
 
 ### 7.2. Debezium
 
@@ -908,8 +913,8 @@ Runtime settings are in 7.1, and for Debezium Server in 7.3.
 
 | Debezium option                                                    | Disposition                     | Note                                                                                                                           |
 | ----------------------------------------------------------------- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| `value.converter=io.debezium.converters.CloudEventsConverter`     | Fixed                           | Structured mode only today; binary mode is documented as future work (1)                                                       |
-| CloudEvents `serializer.type`, `data.serializer.type`             | Fixed `json`                    | Avro is reserved for a format binding (1.2)                                                                                    |
+| `value.converter=io.debezium.converters.CloudEventsConverter`     | Mapped with constraint          | Structured mode only today; binary mode is documented as future work (1)                                                       |
+| CloudEvents `serializer.type`, `data.serializer.type`             | Mapped with constraint          | `json`; Avro is reserved for a format binding (1.2)                                                                            |
 | CloudEvents `extension.attributes.enable`                         | Converted                       | The `iodebezium*` extensions are not OpenCDC attributes; the `cdc*` extensions are required (2)                                |
 | CloudEvents `metadata.source` (`id:generate`)                     | Converted                       | Debezium derives `id` from content; the core requires UUID v4 for DML and DDL (3)                                              |
 | `topic.prefix`                                                    | Mapped                          | Natural `<stream>` name (B-KFK-8)                                                                                              |
@@ -1003,11 +1008,12 @@ Notes:
 | `debezium.sink.kafka.producer.*`                                  | Mapped with constraint          | Passed to the producer with the prefix removed; the settings of B-KFK-32 and B-KFK-46 are set here, since only `bootstrap.servers`, `key.serializer`, and `value.serializer` are required |
 | `debezium.sink.kafka.wait.message.delivery.timeout.ms`            | Mapped                          | How long the server waits for each record's acknowledgement before the checkpoint advances (B-KFK-47); `0` disables the timeout (7) |
 | `debezium.format.value=cloudevents`                               | Mapped                          | The CloudEvents conversion of 7.2 (8)                                                                                          |
-| Transactional producer                                            | Add                             | Not documented; B-KFK-43 rests on option (B) (6)                                                                               |
+| Transactional producer, or a marker held until acknowledgement    | Add                             | Neither is documented; option (B) of B-KFK-43 holds only when a marker falls in a later batch than all of its transaction's records, which the sink does not ensure (6) |
 | Fencing of a second instance                                      | Add                             | Not documented; B-KFK-60 rests on the deployment running one instance per stream                                               |
 
 5. An application that embeds the Debezium engine and writes to Kafka itself creates the producer, and the first table applies to it.
-6. Whether a marker sent in the same producer batch as its transaction's records can become visible to clients before the producer receives their acknowledgements, which would not meet option (B), is to be verified (Section 8, open item 9).
+6. The Kafka sink sends every record of a batch and only then waits for their acknowledgements, so nothing holds a marker until its transaction's records are acknowledged, and a marker in the same batch as any record of its transaction does not meet option (B).
+   This is read from the Debezium Server Kafka sink source (`KafkaChangeConsumer`), not the published documentation, and is recorded on that basis pending verification against captured output (Section 8, open item 9).
    Option (A) does not arise, because no transactional producer is documented.
 7. The documentation states the timeout only; that the checkpoint advances per record only once this wait completes is read from the Debezium Server Kafka sink source (`KafkaChangeConsumer`), not the published documentation, and is recorded on that basis pending verification against captured output (Section 8, open item 9).
 8. The documentation lists `cloudevents` as an output format only; that it selects the `CloudEventsConverter` of 7.2 is read from the Debezium engine source (`ConverterBuilder`), not the published documentation, and is recorded on that basis pending verification against captured output (Section 8, open item 9).
@@ -1141,7 +1147,7 @@ Recorded so they are not lost:
 8. **TRUNCATE on compacted data topics.** *Closed as a documented limitation:* beyond the replay window of a multi-partition compacted topic nothing orders a TRUNCATE against the table's rows in other partitions (1.4, 3.5 note), just as nothing guarantees any transaction there (B-KFK-63); a deployment that needs correct state across a TRUNCATE avoids that configuration (B-KFK-7, 8.1 decision 16).
    A client rule comparing positions, and TRUNCATE on the transaction topic with retention for the life of the stream, were considered and not adopted; tombstoning every key of the table was rejected, because log-based capture records no row keys for a TRUNCATE.
 9. **Publishers outside Kafka Connect.** Record further publishers in 7.3, each from its own published documentation, including replication engines with their own Kafka target or handler and any that reuse Kafka Connect converters without running on a Connect worker.
-   For Debezium Server, verify against captured output (a) whether a marker sent in the same producer batch as its transaction's records can become visible before they are acknowledged (B-KFK-43), (b) that the connector's offset advances only after `wait.message.delivery.timeout.ms` completes (B-KFK-47), and (c) that `debezium.format.value=cloudevents` produces the mapping of 7.2 (7.3 notes 6 to 8).
+   For Debezium Server, verify against captured output (a) that a marker sent in the same producer batch as its transaction's records can become visible before they are acknowledged, as note 6 reads from source (B-KFK-43), (b) that the connector's offset advances only after `wait.message.delivery.timeout.ms` completes (B-KFK-47), and (c) that `debezium.format.value=cloudevents` produces the mapping of 7.2 (7.3 notes 6 to 8).
 10. **Separate DDL topic.** Whether to move `ddl.*` events from the control topic to a fourth topic role, a DDL topic with `cleanup.policy=delete` and the data topics' retention.
     Clients need DDL events only within the replay window, to assemble transactions (B-KFK-64), so a DDL topic would bound the control topic's growth and startup read to STREAM_METADATA and schema versions, and would let DDL statement text under `ddl_capture: "verbatim"` have its own ACLs (B-KFK-14).
     It is not adopted because the core requires a forward-referencing `ddl.CREATE` and its governing OBJECT_METADATA to be emitted on the same emission channel under `ordering_scope: "channel"` ([core Section 9.1][core-9-1]), which B-KFK-59 meets through the control topic's single partition.
@@ -1213,6 +1219,7 @@ Recorded so they are not lost:
 [kip-405]: https://cwiki.apache.org/confluence/display/KAFKA/KIP-405%3A+Kafka+Tiered+Storage
 [kip-534]: https://cwiki.apache.org/confluence/display/KAFKA/KIP-534%3A+Retain+tombstones+and+transaction+markers+for+approximately+delete.retention.ms+milliseconds
 [kip-618]: https://cwiki.apache.org/confluence/display/KAFKA/KIP-618%3A+Exactly-Once+Support+for+Source+Connectors
+[kip-875]: https://cwiki.apache.org/confluence/display/KAFKA/KIP-875%3A+First-class+offsets+support+in+Kafka+Connect
 [asyncapi]: https://www.asyncapi.com/docs/reference/specification/v3.1.0
 [asyncapi-kafka]: https://github.com/asyncapi/bindings/blob/master/kafka/README.md
 [rfc2119]: https://tools.ietf.org/html/rfc2119

@@ -641,8 +641,9 @@ How a consumer treats that boundary is consumer guidance ([core Appendix A.7][co
 
 ### 5.3. Schema Resolution
 
-- **B-KFK-42 (Client).** When a client reads a data event whose `dataschema` is not in its schema cache and that carries no `_schema`, it MUST read the control topic to its current end before treating the event as undecodable.
-  Unless `schema_on_each_event` relaxes B-KFK-34, the schema is on the control topic by the time the data record exists; a miss is a race between independently progressing partitions, not corruption ([core Appendix A.2][core-a2]).
+- **B-KFK-42 (Client).** When a client reads a data event whose `dataschema` is not in its schema cache and that carries no `_schema`, it MUST read the control topic up to an end offset fetched after that data record was read, at the isolation level of its data reads (the last stable offset under `read_committed`).
+  If the schema is still absent, it SHOULD repeat that read, fetching a new end offset each time, for a bound of its own configuration, which may be zero; it then MUST stop at that record as under B-KFK-53, reporting the `dataschema` it could not resolve, and MUST NOT skip the record or read past it.
+  Unless `schema_on_each_event` relaxes B-KFK-34, a miss is a race between independently progressing partitions, or under B-KFK-43 option (A) between the commit markers of one Kafka transaction (5.4), not corruption ([core Appendix A.2][core-a2]).
   A record that carries `_schema` can be decoded from it instead (B-KFK-68).
 
 - **B-KFK-59.** When the publisher writes a `ddl.CREATE` whose `dataschema` is a forward reference ([core Section 9.1][core-9-1]), it MUST write the named OBJECT_METADATA to the control topic after the CREATE, and both MUST be acknowledged before the subject's first DML or `snapshot.READ` record is written.
@@ -688,6 +689,7 @@ If a later core revision specifies `TRX_BEGIN`, every TRX_COMMIT rule of this bi
 For example, a transaction writes D1 to partition 0 and D2 to partition 1, then its marker M; if the send to partition 1 is slow, M can be acknowledged, and read, before D2.
 Under option (B) M is not sent until D1 and D2 are acknowledged, and a slow D2 also holds back the marker of every later transaction.
 Under option (A) a `read_committed` client reads none of them until their Kafka transaction commits, but the commit reaches each partition separately, so it can briefly read M before D2.
+The same holds for a control-topic record in the same Kafka transaction as a data record that depends on it (B-KFK-34, B-KFK-37, B-KFK-59); B-KFK-42's repeated read covers that case, and a record in an earlier Kafka transaction of the same producer is visible first, since the coordinator does not let that producer write to its next transaction until the previous one's markers are written (8.1, decision 19).
 
 With B-KFK-43 satisfied, a TRX_COMMIT tells a client that every event of the transaction is durable on its data topic; if the client does not yet hold all ordinals `0..event_count-1`, it is behind on some partition, not missing data.
 Because the transaction topic is a single partition written in commit order, it is also the stream's commit-order spine: a client that applies transactions in the order of their first-seen markers, discarding duplicate markers by `(source, id)`, applies them in source commit order across all tables.
@@ -1034,6 +1036,15 @@ None is ratified; each is a place where this draft made a call so that review ha
     The binding defines no check between `_schema` and the OBJECT_METADATA that `dataschema` names, as the core defines none.
 18. B-KFK-43 is met by one of two options, Kafka transactions (A) or an acknowledgement-gated marker (B), each with its own conditions, adopted on 21 October 2026 after review.
     A batch handed to a producer is not a barrier, Kafka transactions commit to each partition separately, and under either option the source checkpoint waits for the marker (B-KFK-47), because a checkpoint that passes a transaction before its marker is durable loses the marker on restart.
+19. A client's schema miss is resolved by a bounded repeated read of the control topic (B-KFK-42), and B-KFK-34's acknowledgement barrier needs no separate condition under Kafka transactions, adopted on 21 October 2026 after review.
+    A Kafka transaction is atomic but does not become visible on all its partitions at once: the transaction coordinator answers the producer's `EndTxn` request, which is when `commitTransaction()` returns, as soon as the `PREPARE_COMMIT` entry is durable in its transaction log, and only then sends the commit markers, which each partition applies separately; a `read_committed` client's last stable offset on a partition advances only when that partition's marker is applied.
+    So a control-topic record in the same Kafka transaction as a data record that names it can briefly be unreadable after the data record is read, which is the case B-KFK-42's repeated read covers.
+    A record in an earlier Kafka transaction of the same producer (the same `transactional.id`, B-KFK-60) cannot be overtaken: the coordinator moves a transaction from `PREPARE_COMMIT` to `COMPLETE_COMMIT` only once every partition has acknowledged its marker, and until then answers any request to add a partition to that producer's next transaction with `CONCURRENT_TRANSACTIONS`, under both transaction protocol versions.
+    Under version 1 that request is the producer's own `AddPartitionsToTxn`, together with the broker's check on produce that the partition is in the transaction; under version 2 ([KIP-890][kip-890]) it is the broker's implicit add on produce (`TransactionCoordinator`, `handleAddPartitionsToTransaction` and `handleVerifyPartitionsInTransaction`); either way no record of the next transaction is appended before the earlier one is visible.
+    Where different producers write the control topic and the data topics, as option (B) permits, this does not apply, and the ordering comes from B-KFK-34's acknowledgement barrier.
+    A rule forbidding the control record and its data in one Kafka transaction was considered and rejected: atomic commit already guarantees that both become visible or neither does, and the window is one of marker propagation, which the client's bound absorbs.
+    The repeated read is a SHOULD with no default bound, because a bound of zero, stopping at the first miss, is a valid client choice; after the bound the client stops (B-KFK-53) rather than buffering, since it cannot tell a missing schema from a late one before then.
+    The commit sequence follows the transaction protocol of [KIP-98][kip-98] and [KIP-890][kip-890]; that the coordinator holds the producer's next transaction off until every marker is written is implementation behaviour the KIPs do not state as a guarantee to clients, and was checked against the Apache Kafka source (4.2 development branch, November 2025).
 
 ### 8.2. Deferred Features
 
@@ -1176,6 +1187,7 @@ Recorded so they are not lost:
 [kafka-docs]: https://kafka.apache.org/documentation/
 [kafka-connect]: https://kafka.apache.org/documentation/#connect
 [kip-98]: https://cwiki.apache.org/confluence/display/KAFKA/KIP-98+-+Exactly+Once+Delivery+and+Transactional+Messaging
+[kip-890]: https://cwiki.apache.org/confluence/display/KAFKA/KIP-890%3A+Transactions+Server-Side+Defense
 [kip-405]: https://cwiki.apache.org/confluence/display/KAFKA/KIP-405%3A+Kafka+Tiered+Storage
 [kip-534]: https://cwiki.apache.org/confluence/display/KAFKA/KIP-534%3A+Retain+tombstones+and+transaction+markers+for+approximately+delete.retention.ms+milliseconds
 [kip-618]: https://cwiki.apache.org/confluence/display/KAFKA/KIP-618%3A+Exactly-Once+Support+for+Source+Connectors

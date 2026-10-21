@@ -251,8 +251,9 @@ requirements:
   level: MUST
   who: Client
   section: '5.3'
-  requirement: On a data event whose dataschema is not cached and that carries no _schema, a client MUST read the control topic to its current end before treating
-    the event as undecodable.
+  requirement: On a data event whose dataschema is not cached and that carries no _schema, a client MUST read the control topic to an end offset fetched after
+    that record was read, at its data isolation level, SHOULD repeat that read for a bound it configures (which may be zero), and then MUST stop at the record
+    and report the unresolved dataschema, never skipping it.
 - id: B-KFK-43
   level: MUST
   who: Publisher

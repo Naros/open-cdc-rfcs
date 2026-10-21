@@ -172,8 +172,8 @@ requirements:
   level: MUST
   who: Publisher
   section: '4.1'
-  requirement: STREAM_METADATA MUST declare transaction_boundaries commit_all and transaction_marker_delivery transaction_metadata_channel, and a TRX_COMMIT MUST
-    be emitted for every transaction.
+  requirement: STREAM_METADATA MUST declare transaction_boundaries commit_all and transaction_marker_delivery transaction_metadata_channel; a TRX_COMMIT MUST be
+    emitted for every transaction with at least one published DML (TRUNCATE included) or DDL event, and none with event_count 0; snapshot batches have no TRX_COMMIT.
 - id: B-KFK-30
   level: MUST
   who: Publisher
@@ -266,7 +266,7 @@ requirements:
   who: Publisher
   section: '5.4'
   requirement: Publisher filtering MUST take effect before cdctxorder assignment and marker computation; ordinals MUST be dense and markers MUST describe exactly
-    the published events.
+    the published events; a transaction with no published DML or DDL event has no TRX_COMMIT.
 - id: B-KFK-45
   level: MUST
   who: Deployment
@@ -405,3 +405,9 @@ requirements:
     TRUNCATE included, and every snapshot.READ record (beyond the core text) also carries _schema, counted in size limits and never omitted to fit them; a client
     whose cache lacks a record's dataschema MAY decode from _schema instead of reading the control topic, with no defined check against dataschema, while B-KFK-52,
     B-KFK-64, and B-KFK-66 still apply.
+- id: B-KFK-69
+  level: MUST
+  who: Client
+  section: '5.4'
+  requirement: A client MUST treat a TRX_COMMIT whose event_count is 0 as the marker of a complete transaction with no events, and MAY apply the B-KFK-61 offset
+    commit on its account.

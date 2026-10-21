@@ -268,7 +268,7 @@ Every OpenCDC binding declares the transport capabilities it relies on, so that 
 | ----------------------------------- | ------------------------------------------------------ | ------------------------------------------------------------------------------- |
 | Per-client session                  | No; the publisher never observes readers               | `session_aware: false` (4.1); STREAM_METADATA and schema via control topic (5.1) |
 | Ordered delivery                    | Per partition only                                     | Channel = partition; cross-partition order restored from the transaction topic (5.4) |
-| Multiple ordered channels           | Topics times partitions                                | Multi-channel delivery; TRX_COMMIT required for every transaction (4.1)        |
+| Multiple ordered channels           | Topics times partitions                                | Multi-channel delivery; TRX_COMMIT required for every transaction with a published DML or DDL event (B-KFK-29) |
 | Per-record metadata headers         | Yes (record format v2, Kafka 0.11 and later)           | Binary content mode available (3.3)                                            |
 | Key-based partition assignment      | Yes; the partitioner is a client-side function         | Row identity fixes the partition (3.4); relays preserve partition numbers (B-KFK-36) |
 | Broker-side retention               | Yes, per topic, by time or size                        | Replay window is the data topics' time retention (5.5)                          |
@@ -541,8 +541,11 @@ The publisher emits STREAM_METADATA as usual ([core Section 10.4][core-10-4]); t
 | `tables`                               | Every captured table of *this stream*           | Each table's row events are on one data topic (B-KFK-30)                                              |
 
 - **B-KFK-28.** STREAM_METADATA MUST declare `session_aware: false` or omit it.
-- **B-KFK-29.** STREAM_METADATA MUST declare `transaction_boundaries: "commit_all"` and `transaction_marker_delivery: "transaction_metadata_channel"`, and the publisher MUST emit a TRX_COMMIT for every transaction, whatever `transaction_interleaving` it declares.
-  This realizes P-TRX-7 as a requirement: a client of a partitioned stream cannot prove completion of any transaction, single-event or not, without a marker.
+- **B-KFK-29.** STREAM_METADATA MUST declare `transaction_boundaries: "commit_all"` and `transaction_marker_delivery: "transaction_metadata_channel"`.
+  Whatever `transaction_interleaving` it declares, the publisher MUST emit a TRX_COMMIT for every transaction that has at least one published DML (TRUNCATE included) or DDL event (B-KFK-44), and MUST NOT emit a TRX_COMMIT whose `event_count` is 0.
+  Snapshot batches (`snapshot.READ` events under a `snapshot:` `cdcxid`) are not transactions for this rule and have no TRX_COMMIT; initial-load completion is signalled as core P-SNAP-1 requires.
+  This realizes P-TRX-7 as a requirement: a client of a partitioned stream cannot prove completion of any such transaction, single-event or not, without a marker.
+  This binding guarantees the redelivery obligation of R-POS-6 for the transactions that have a TRX_COMMIT; whether it extends to snapshot batches is open (8.3 item 13).
 - **B-KFK-30.** The DML, TRUNCATE, and `snapshot.READ` events of a subject MUST all be written to one data topic, which MUST NOT change for the life of the stream, so that a client configured with a subject's data topic receives every row event of that subject.
   Reconnect coverage MUST be declared as the core requires (P-SCHEMA-2, P-SCHEMA-4).
   Under `ordering_scope: "channel"` the core permits `schema_on_reconnect: true` with `session_aware: false` ([core Section 4.5.2][core-4-5-2]), and the control topic is the durable control channel that realizes it; `schema_on_each_event: true` is then optional.
@@ -670,7 +673,11 @@ Schema versions are cached by `id`, never overwritten by table, so that a replay
 The control topic grows with every DDL event, including the statement text under `ddl_capture: "verbatim"`, and startup reads all of it; pruning is deferred (Section 8).
 - **B-KFK-44.** Any filtering the publisher applies (by table, operation, column value, or any other criterion) MUST take effect before `cdctxorder` values are assigned and before TRX_COMMIT `event_count` and `distribution` are computed.
   `cdctxorder` MUST be dense over the events published, and `event_count` and `distribution` MUST describe exactly those events.
-  A transaction none of whose events is published produces no TRX_COMMIT.
+  A transaction none of whose DML or DDL events is published produces no TRX_COMMIT (B-KFK-29).
+- **B-KFK-69 (Client).** A client that reads a TRX_COMMIT whose `event_count` is 0, which a conformant publisher does not emit (B-KFK-29), MUST treat it as the marker of a complete transaction with no events, and MAY apply the B-KFK-61 offset commit on its account.
+
+*Note.* OpenCDC defines no event that announces a transaction before its data (`TRX_BEGIN` and `TRX_ABORT` are reserved type names in the core, not specified), so a client learns that a transaction started only from its events; if a transaction has no published events, a TRX_COMMIT for it is irrelevant.
+If a later core revision specifies `TRX_BEGIN`, every TRX_COMMIT rule of this binding (B-KFK-29, B-KFK-43, B-KFK-44, B-KFK-47, B-KFK-48, B-KFK-61, B-KFK-64, B-KFK-69) is to be re-evaluated, starting with whether an announced transaction with no published event needs a closing marker.
 
 | B-KFK-43 option           | TRX_COMMIT is written                                                  | `read_committed` client                                                          | `read_uncommitted` client | Producer instances |
 |---------------------------|------------------------------------------------------------------------|----------------------------------------------------------------------------------|---------------------------|--------------------|
@@ -716,7 +723,7 @@ This revision defines Durable Mode only ([core Section 15.1][core-15-1]).
   On every stream topic the deployment MUST set `unclean.leader.election.enable=false`, MUST set `min.insync.replicas` to at least 2, and MUST use a replication factor of at least `min.insync.replicas` plus 1 (3 or more is typical).
   With one in-sync replica, `acks=all` acknowledges a single broker's write, which does not meet core Section 15.1's durability obligation; unclean leader election discards acknowledged records, which is a gap no client can detect.
 - **B-KFK-47.** The publisher MUST NOT advance its source checkpoint (for example, a Kafka Connect source offset) past an event until that event's record has been acknowledged by the cluster.
-  For a transaction that has a TRX_COMMIT, it MUST NOT advance it past any of the transaction's events until that TRX_COMMIT has been acknowledged (B-KFK-43 option B) or the Kafka transaction holding it has committed (option A); a checkpoint that passed the transaction before its marker was durable would lose the marker on restart.
+  For a transaction that has a TRX_COMMIT (snapshot batches and fully filtered transactions have none, B-KFK-29), it MUST NOT advance it past any of the transaction's events until that TRX_COMMIT has been acknowledged (B-KFK-43 option B) or the Kafka transaction holding it has committed (option A); a checkpoint that passed the transaction before its marker was durable would lose the marker on restart.
   After a restart it resumes from its checkpoint and re-emits events, and the TRX_COMMIT of every transaction its checkpoint had not passed, with their original `id` values; the resulting duplicates are permitted (R-POS-5) and are resolved by `(source, id)`.
 
 *Note.* A TRX_COMMIT that is not yet durable holds the source checkpoint, and with it the source log that the publisher's reader retains (a replication slot's confirmed position, redo or archive logs, a binlog); under option (B) one slow acknowledgement holds it for every later transaction, so source log retention and alerting on checkpoint lag account for the longest expected producer stall.
@@ -897,7 +904,7 @@ Runtime settings are in 7.1, and for Debezium Server in 7.3.
 | Partition routing SMT (`PartitionRouting`)                        | Mapped with constraint          | Must be a deterministic function of row identity (B-KFK-21, B-KFK-22)                                                          |
 | `message.key.columns`                                             | Mapped with constraint          | Only immutable columns preserve per-row partitioning; mutable key columns move a row between partitions (B-KFK-21)             |
 | `tombstones.on.delete`                                            | Mapped with constraint          | `true` only on compacted data topics (B-KFK-62); `false` otherwise, since tombstones are not events (B-KFK-25)                 |
-| `provide.transaction.metadata`                                    | Converted                       | Debezium `END` records map to TRX_COMMIT; `BEGIN` records have no OpenCDC counterpart (5)                                      |
+| `provide.transaction.metadata`                                    | Converted                       | Debezium `END` records map to TRX_COMMIT; `BEGIN` records have no OpenCDC counterpart; none surround snapshot records, and an `END` whose `event_count` is 0 is not mapped (B-KFK-29) (5) |
 | `topic.transaction` (`<prefix>.transaction`)                      | Mapped                          | Transaction topic; must have one partition (B-KFK-6) and hold HEARTBEAT (B-KFK-49)                                             |
 | `heartbeat.interval.ms`, `topic.heartbeat.prefix`                 | Converted                       | Debezium heartbeats are source-offset keep-alives on their own topic; OpenCDC HEARTBEAT goes to the transaction topic (B-KFK-49) |
 | Schema history topic (log-based connectors that keep one)        | Out of scope, and add           | Internal DDL history is not OBJECT_METADATA; the control topic must be added (B-KFK-33) (6)                                    |
@@ -922,6 +929,8 @@ Notes:
 4. Routing several tables to one topic keeps them in one set of partitions, but a client can no longer choose tables by topic.
    Clients then select tables by `subject` rather than by topic.
 5. Debezium's `END` record carries `event_count` and `data_collections`, which the core notes is semantically equivalent to `distribution` (core Section 10.5.3).
+   Connectors that open Debezium's transaction metadata at the source's own BEGIN (PostgreSQL, MySQL, and MariaDB) write a `BEGIN` and `END` pair even for a transaction none of whose events is published, so that `END` has `event_count` 0 and is not mapped to a TRX_COMMIT (B-KFK-29).
+   The Oracle connectors (LogMiner, buffered and unbuffered, OpenLogReplicator, and XStream) and the SQL Server connector open a transaction only at its first published data event, so they write no such pair.
    In the Connect pipeline the connector returns the `END` record in the same stream of records as its transaction's data as soon as it observes the source commit; without exactly-once support that meets neither option of B-KFK-43, and option (B) needs the task to hold `END` as 7.1 note 2 describes.
    With exactly-once support, the Debezium connectors do not, as of this writing, implement `SourceConnector#canDefineTransactionBoundaries` (`transaction.boundary=connector`), so under `poll` or `interval` Debezium meets option (A) only if its committed offset never passes a source commit before the Kafka transaction holding that `END` commits (B-KFK-47), which depends on how each connector records its position within a transaction.
 6. Schema history topics store DDL for the connector's own recovery and are not intended for clients.
@@ -1081,6 +1090,11 @@ Recorded so they are not lost:
 12. **`_schema` on `snapshot.READ`.** Core Section 4.5.3 and P-SCHEMA-5 require `_schema` in "every DML event", and Sections 4.1 (P-ORD-4) and 4.5.1 name `snapshot.READ` alongside DML, not within it.
     This binding requires `_schema` on `snapshot.READ` as well (B-KFK-68), because snapshot records are typically the first a consumer sees for a table, and a consumer without a schema cache is the case Schema on Each Event exists for.
     The core should state that `snapshot.READ` is covered, and which data schema validates a `snapshot.READ` record's `data`; conformance tooling that validates it against anything other than the DML data schema may reject this binding's output.
+13. **Snapshot batches and transaction markers.** Core P-TRX-7 and R-POS-6 speak of every transaction, while `snapshot.READ` events carry a distinct `snapshot:` `cdcxid`, are named separately from DML (P-ORD-4), are not stated to count toward `event_count` (P-TRX-2), and signal completion through P-SNAP-1 rather than a marker.
+    This binding treats snapshot batches as having no TRX_COMMIT (B-KFK-29); the core should say whether a snapshot `cdcxid` group is a transaction for P-TRX-7 and R-POS-6.
+14. **Idle periods and filtered activity.** Core Section 10.1 requires HEARTBEAT "during idle periods (no DML changes occurring)", which does not say whether source activity that the producer filters out, and so publishes nothing, is an idle period.
+    Under this binding a fully filtered transaction has no TRX_COMMIT (B-KFK-29), so during filtered-only activity a HEARTBEAT is the only record that can carry an advancing `pos`.
+    The core should say whether filtered-only activity is an idle period, and whether a HEARTBEAT's `pos` reflects the producer's source position over filtered log.
 
 ### 8.4. Open Items
 

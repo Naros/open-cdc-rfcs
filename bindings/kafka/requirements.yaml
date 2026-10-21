@@ -257,8 +257,10 @@ requirements:
   level: MUST
   who: Publisher
   section: '5.4'
-  requirement: A TRX_COMMIT MUST be written after its transaction's events (data topics, and the control topic for DDL) and in source commit order, and MUST NOT become
-    visible before those records are acknowledged.
+  requirement: A TRX_COMMIT MUST be sent after its transaction's events (data topics, and the control topic for DDL) and in source commit order, by option (A),
+    one producer instance with the marker in the same or a later Kafka transaction than the last event record (protects read_committed clients only), or option (B),
+    the marker sent only after every event record is acknowledged and released in source commit order (protects every client; the only option with more than one
+    producer instance).
 - id: B-KFK-44
   level: MUST
   who: Publisher
@@ -281,7 +283,8 @@ requirements:
   level: MUST
   who: Publisher
   section: '5.6'
-  requirement: The publisher MUST NOT advance its source checkpoint past an event until its record is acknowledged; restarts re-emit with original ids.
+  requirement: The publisher MUST NOT advance its source checkpoint past an event until its record is acknowledged, nor, for a transaction that has a TRX_COMMIT,
+    past any of its events until the TRX_COMMIT is acknowledged (B-KFK-43 option B) or its Kafka transaction has committed (option A); restarts re-emit with original ids.
 - id: B-KFK-48
   level: MUST
   who: Publisher and Client

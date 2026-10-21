@@ -112,7 +112,7 @@ Four parties appear in requirements:
   Guidance on what a consumer does with the events it receives remains in the core, [Appendix A][core-appendix-a], and is not restated here.
 - **Relay.** A component that copies the stream's records from one set of topics to another, within or across clusters (B-KFK-36).
 
-Requirement identifiers are stable once allocated.
+Requirement identifiers are stable once allocated and are not a reading order: a requirement added in a later revision takes the next free number and sits wherever it belongs by topic.
 A withdrawn requirement keeps its number and is marked withdrawn in the register; numbers are never reused.
 
 ### 1.2. Relation to Kafka and CloudEvents

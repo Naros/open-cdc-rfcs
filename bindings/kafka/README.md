@@ -162,7 +162,7 @@ The *channel* of core Terms and Definitions corresponds to a partition, not a to
 - **B-KFK-6 (Deployment).** The transaction topic MUST have exactly one partition and a `cleanup.policy` of `delete`.
 - **B-KFK-7 (Deployment).** Every data topic MUST have a `cleanup.policy` of `delete`, `compact`, or `compact,delete`.
   On a data topic with compaction enabled, the deployment MUST set `min.compaction.lag.ms` explicitly; its default of 0 would give the stream a replay window of zero (B-KFK-45).
-  Records older than a compacted topic's lag are table state, at least the latest record per key and possibly no other, rather than an OpenCDC changelog (B-KFK-63).
+  Records older than a compacted topic's lag are table state rather than an OpenCDC changelog: compaction removes superseded records for a key, and no record there is guaranteed to survive (B-KFK-63).
   A deployment whose clients need complete transactions and their TRX_COMMIT markers beyond the replay window MUST NOT enable compaction on its data topics (B-KFK-63).
   State taken from the compacted region of a multi-partition data topic is not valid across a TRUNCATE (3.5); a deployment whose clients need it to be gives that topic a single partition, does not enable compaction on it, or does not capture TRUNCATE for its tables (3.5), none of which the broker enforces for it.
 - **B-KFK-67 (Deployment).** A data topic whose `cleanup.policy` includes `compact` MUST NOT receive a record with a null key.
@@ -170,7 +170,7 @@ The *channel* of core Terms and Definitions corresponds to a partition, not a to
 
 *Why compaction is admitted.* Compaction on a data topic is a broker storage optimization: once a later record for a key supersedes an earlier one, the broker need not keep the earlier one.
 Kafka never compacts a record newer than the topic's `min.compaction.lag.ms`, and that lag bounds the replay window (B-KFK-45), so every event a client reads within the window is intact and in order, exactly as on a `delete` topic.
-Beyond the window, each partition keeps at least the latest record per key, and possibly no other, and B-KFK-63 applies.
+Beyond the window, compaction removes superseded records for a key, though it may not yet have removed all of them, so no record there is guaranteed to survive, and B-KFK-63 applies.
 
 That retained state is not a substitute for a snapshot, and a reader that takes it as current table state is right only in part:
 
@@ -518,7 +518,7 @@ A stream can therefore carry no `dml.TRUNCATE` for a table that was truncated at
 With `schema_on_each_event`, a deployment sizes `max.message.bytes` for the event plus `_schema`, and broker storage for the larger records, before enabling the mode on wide tables; a snapshot carries `_schema` on every row (B-KFK-68).
 
 *Note.* Kafka clients return a record batch larger than `fetch.max.bytes` or `max.partition.fetch.bytes` rather than stalling, so a client needs no fetch configuration to make progress past a large event.
-It does need memory for the largest record the topics accept, which it can read from their `max.message.bytes` (B-KFK-65).
+It does need memory for the largest record the topics accept, a limit the deployment sets with `max.message.bytes` (B-KFK-27).
 
 ## 4. Stream Profile and Delivery Properties
 
@@ -707,15 +707,17 @@ Assembly strategies, bounded waits, and subset consumption by `distribution` are
 
 - **B-KFK-45 (Deployment).** A stream's replay window is set by its data topics' configuration: it is the smallest, over the data topics, of `retention.ms` for a topic whose `cleanup.policy` is `delete`, and of `min.compaction.lag.ms` (or `retention.ms`, if smaller and the policy also includes `delete`) for a topic with compaction enabled.
   It is unbounded when every data topic has `cleanup.policy=delete` and `retention.ms=-1`.
-  The window belongs to the deployment, not the publisher, and a client reads it from the topic configuration (B-KFK-65).
+  The window belongs to the deployment, not the publisher.
   Records older than the window may still be present; they are outside the claim.
 
 *Note.* The window is not declared by the publisher, because the publisher does not own it and a declared copy would drift whenever an operator changes a topic.
-An operator that reduces retention or a compaction lag removes replayable positions; a client resuming from one meets the gap handling of B-KFK-40.
-Operators are expected to publish the window they intend to keep alongside the stream address (6.1).
-- **B-KFK-63 (Client).** On a data topic whose `cleanup.policy` includes `compact`, a client MUST treat records whose record timestamp is older than the topic's `min.compaction.lag.ms` as table state, not as a changelog, whether or not the publisher writes tombstones (B-KFK-62): compaction removes superseded records for a key regardless of tombstones, and may not yet have removed all of them.
-  It MUST NOT expect transactions among those records to be complete or their TRX_COMMIT markers to be available, MUST NOT take a marker's presence on the transaction topic as evidence that the transaction's records survive on this topic (B-KFK-35 requires the transaction topic's `retention.ms` to exceed, for every data topic, that topic's replay horizon plus `segment.ms` plus the broker's `log.retention.check.interval.ms`), and MUST expect `cdctxorder` gaps among them.
+An operator that reduces retention removes replayable positions, and a client resuming from one meets the gap handling of B-KFK-40; one that reduces a compaction lag makes more of the log eligible for compaction, and a client resuming across that range gets no error from Kafka and reads what B-KFK-63 describes.
+An operator may tell clients the window it intends to keep; the binding defines no field for it, and no client rule depends on it.
+- **B-KFK-63 (Deployment).** On a data topic whose `cleanup.policy` includes `compact`, records older than the topic's `min.compaction.lag.ms` are table state, not a changelog, whether or not the publisher writes tombstones (B-KFK-62): compaction removes superseded records for a key regardless of tombstones, though it may not yet have removed all of them, so no record there, including an event of a transaction, is guaranteed to survive.
+  Transactions among those records are not guaranteed to be complete, their `cdctxorder` values may have gaps, and a TRX_COMMIT's `event_count` and `distribution` are not guaranteed to be satisfiable there.
+  A marker's presence on the transaction topic is not evidence that the transaction's records survive on the data topic (B-KFK-35 requires the transaction topic's `retention.ms` to exceed, for every data topic, that topic's replay horizon plus `segment.ms` plus the broker's `log.retention.check.interval.ms`).
   Records inside the lag are an unaltered changelog, as on any other data topic.
+  A client that reads such a topic from its beginning (B-KFK-52), or resumes beyond the replay window (B-KFK-45), receives table state for that range without any signal from Kafka; a deployment whose clients need complete transactions there does not enable compaction (B-KFK-7).
 
 *Note.* B-KFK-63 relies on record timestamps being publish times (B-KFK-41).
 A client that bootstraps from compacted state and then continues into the changelog crosses from state to events at the lag boundary; how it reconciles the two is consumer guidance, comparable to the snapshot-to-steady-state transition ([core Appendix A.8][core-a8]).
@@ -812,7 +814,7 @@ A client reads a stream from topics it is configured with, as any Kafka consumer
 Three sources are involved.
 **Stream declarations** (capability axes, tables, heartbeat interval, schema delivery) belong to STREAM_METADATA on the control topic ([core Section 2.2a][core-2-2a], producer-sole-emitter invariant).
 **Client configuration** names the stream's topics: its control topic, its transaction topic, and the data topics the client reads.
-**Topic configuration** (partition counts, retention, compaction, size limits) belongs to the deployment, and a client reads it from Kafka (B-KFK-65).
+**Topic configuration** (partition counts, retention, compaction, size limits) belongs to the deployment; no client rule requires a client to read a topic setting, so it needs no Kafka permission beyond those that consuming the stream's topics requires.
 The content mode is carried on every record (B-KFK-3), and every event carries its `subject`.
 
 ### 6.1. Client Configuration
@@ -822,7 +824,7 @@ The content mode is carried on every record (B-KFK-3), and every event carries i
 - **B-KFK-66 (Client).** A client MUST read the stream's control topic and transaction topic, and the data topic of every subject whose events it processes.
   A client that processes only some subjects verifies that it holds every event of a transaction for those subjects by counting, per subject, the distinct `cdctxorder` ordinals it has read from that subject's data topic and from the control topic against `distribution` (B-KFK-71), not by holding every ordinal `0..event_count-1` ([core Appendix A.10][core-a10]).
   It cannot reconstruct the transaction as a whole, order events of different subjects within it, or apply it atomically with subjects other clients read; the order of transactions is the commit order of their markers on the transaction topic (B-KFK-6, B-KFK-43, B-KFK-60).
-- **B-KFK-65 (Deployment).** The deployment MUST grant `Describe` and `DescribeConfigs` on every stream topic to each principal authorized to read the stream, so that a client can read partition counts, `cleanup.policy`, `retention.ms`, `min.compaction.lag.ms`, and `max.message.bytes` from Kafka.
+- **B-KFK-65.** *Withdrawn.* It required the deployment to grant clients `Describe` and `DescribeConfigs` on the stream's topics; no client rule needs a topic setting (Section 8, decision 14).
 - **B-KFK-56.** *Withdrawn.* It governed the stream descriptor, which was removed (Section 8, decision 15).
 - **B-KFK-57.** *Withdrawn.* It governed the stream descriptor, which was removed (Section 8, decision 15).
 
@@ -1035,10 +1037,11 @@ None is ratified; each is a place where this draft made a call so that review ha
     The first draft recommended a JSON-array encoding that included the table name; that would have moved every row of an existing Debezium deployment to a different partition, while no client reads the key's contents.
 13. `ordering_scope` is fixed at `"channel"` (B-KFK-31), revised on 23 September 2026 after review.
     The first draft recommended it only for publishers that partition in-process, which on Kafka is every publisher; a conditional value would have tied the declaration to partitioner configuration.
-14. Partition counts, retention, compaction, and size limits are read from Kafka rather than declared by the publisher (B-KFK-45, B-KFK-65), revised on 23 September 2026 after review.
+14. Partition counts, retention, compaction, and size limits are owned by the deployment, are not declared by the publisher, and no client rule requires a client to read them from Kafka (B-KFK-45, B-KFK-63), revised on 23 September 2026 and again on 21 October 2026 after review.
     The first draft declared `replayWindow`, `maxEventBytes`, partition counts, and a compaction flag in the descriptor, but those are set by the broker operator, which a connector usually neither controls nor can see, and a copy would drift when a topic is reconfigured.
+    The 23 September revision had clients read these settings from Kafka under a `DescribeConfigs` grant (B-KFK-65, now withdrawn); no client rule needs one, since partition counts come with `Read`, size limits do not gate progress, a retention gap surfaces through B-KFK-40, and B-KFK-63 describes the compacted range rather than asking a client to detect it.
 15. The stream descriptor is removed, and clients are configured with the stream's topics as Kafka consumers are (6.1, B-KFK-55, B-KFK-66), revised on 23 September 2026 after review.
-    Every member the descriptor carried was client configuration, carried on each record (content mode, `subject`), or topic configuration read from Kafka, and keeping a copy on the control topic was the source of repeated drift and ownership problems.
+    Every member the descriptor carried was client configuration, carried on each record (content mode, `subject`), or topic configuration owned by the deployment, and keeping a copy on the control topic was the source of repeated drift and ownership problems.
     B-KFK-16, B-KFK-56, and B-KFK-57 are withdrawn.
 16. Ordering a TRUNCATE in the compacted region is a documented limitation rather than a client or topic mechanism: a deployment that needs transaction fidelity or correct state across a TRUNCATE beyond the replay window avoids multi-partition compaction for those tables (B-KFK-7), adopted on 23 September 2026 after review.
 17. `schema_on_each_event` changes what a DML or `snapshot.READ` record carries, not where any record is written (B-KFK-68), adopted on 21 October 2026 after review.

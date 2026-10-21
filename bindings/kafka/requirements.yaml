@@ -274,7 +274,7 @@ requirements:
   who: Deployment
   section: '5.5'
   requirement: The replay window MUST be taken as the smallest data-topic retention.ms (delete) or min.compaction.lag.ms (compact, or retention.ms if smaller); it
-    belongs to the deployment and clients read it from topic configuration.
+    belongs to the deployment.
 - id: B-KFK-46
   level: MUST
   who: Publisher and Deployment
@@ -373,10 +373,10 @@ requirements:
     MUST carry no content-type or ce_ headers, and a client MUST NOT treat a tombstone as an OpenCDC event.
 - id: B-KFK-63
   level: MUST
-  who: Client
+  who: Deployment
   section: '5.5'
-  requirement: On a data topic whose cleanup.policy includes compact a client MUST treat records older than min.compaction.lag.ms as table state, MUST NOT expect
-    their transactions or markers to be complete, and MUST expect cdctxorder gaps among them.
+  requirement: On a compacted data topic, records older than min.compaction.lag.ms are table state, not a changelog, with no guarantee of complete transactions or
+    satisfiable markers; a client reading them gets no signal from Kafka, and a deployment whose clients need complete transactions there does not compact (B-KFK-7).
 - id: B-KFK-64
   level: MUST
   who: Client
@@ -384,11 +384,10 @@ requirements:
   requirement: A client assembling transactions MUST include control-topic DDL events by cdcxid and cdctxorder, and MUST NOT process as a new change a DDL event whose
     TRX_COMMIT precedes its transaction-topic start position.
 - id: B-KFK-65
-  level: MUST
+  level: WITHDRAWN
   who: Deployment
   section: '6.1'
-  requirement: The deployment MUST grant Describe and DescribeConfigs on every stream topic to each principal authorized to read the stream, so clients can read partition
-    counts, cleanup.policy, retention, compaction lag, and size limits.
+  requirement: 'Withdrawn: required Describe and DescribeConfigs grants for clients; no client rule needs a topic setting (Section 8, decision 14).'
 - id: B-KFK-66
   level: MUST
   who: Client

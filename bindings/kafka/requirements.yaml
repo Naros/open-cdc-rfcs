@@ -306,13 +306,14 @@ requirements:
   level: MUST
   who: Deployment
   section: '5.8'
-  requirement: The partition count of a stream topic MUST NOT change while the stream exists; repartitioning is a new stream.
+  requirement: The partition count of a stream topic MUST NOT change while the stream exists; repartitioning is a new stream, and client behaviour after a violation
+    is undefined.
 - id: B-KFK-52
   level: MUST
   who: Client
   section: '5.8'
-  requirement: A client MUST keep reading the control topic, MUST stop if a stream topic's partition count changes, MUST read a newly added subject's data topic from
-    its beginning once configured, and MUST treat identical STREAM_METADATA as no change.
+  requirement: A client MUST keep reading the control topic, MUST read a newly added subject's data topic from its beginning once configured, and MUST treat identical
+    STREAM_METADATA as no change.
 - id: B-KFK-53
   level: MUST
   who: Publisher and Client
@@ -413,3 +414,8 @@ requirements:
   section: '5.4'
   requirement: A client MUST treat a TRX_COMMIT whose event_count is 0 as the marker of a complete transaction with no events, and MAY apply the B-KFK-61 offset
     commit on its account.
+- id: B-KFK-70
+  level: SHOULD
+  who: Client
+  section: '5.8'
+  requirement: A client SHOULD stop consuming the stream if it observes that a stream topic's partition count has changed (B-KFK-51).

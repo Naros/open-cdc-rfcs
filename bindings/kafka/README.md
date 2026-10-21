@@ -761,11 +761,15 @@ A data partition that receives nothing for a long time is normal; a transaction 
 - **B-KFK-50.** Before writing the first event for a subject added to the stream, the publisher MUST write STREAM_METADATA updated as the core requires when `tables` changes, and MUST have it acknowledged.
   A new subject's data topic reaches clients through their configuration, not through the stream (B-KFK-52).
 - **B-KFK-51 (Deployment).** The partition count of a stream topic MUST NOT change while the stream exists.
+  Client behaviour after a violation of this rule is undefined.
   Adding partitions changes the partition of existing keys, which breaks per-row order across the change.
+  Adding partitions to the control or transaction topic, which have one partition (B-KFK-5, B-KFK-6), also loses the total order of its records.
   Repartitioning is done by creating a new stream (new stream name, new topics) and migrating clients to it.
-- **B-KFK-52 (Client).** A client MUST keep reading the control topic while it consumes the stream, and MUST stop consuming the stream if a stream topic's partition count, as Kafka metadata reports it, changes while the client is consuming (B-KFK-51).
+- **B-KFK-52 (Client).** A client MUST keep reading the control topic while it consumes the stream.
   When STREAM_METADATA adds a subject whose events the client processes, the client MUST read that subject's data topic from its beginning offset once it is configured with it.
   A client MUST treat STREAM_METADATA whose content is identical to the one it holds as no change.
+- **B-KFK-70 (Client).** A client SHOULD stop consuming the stream if it observes that a stream topic's partition count has changed (B-KFK-51).
+  A client that subscribes observes the change only if a new partition is assigned to it, as a partition it has not held before and holds no position for (B-KFK-40); one that assigns partitions itself observes it only by comparing topic metadata with the partition count it holds.
 
 A client that reads only some tables is configured with those tables' data topics and reads the transaction topic in full.
 When a TRX_COMMIT's `distribution` names a subject the client processes but has no topic for, its configuration is incomplete.
@@ -785,7 +789,7 @@ Kafka reports failures as client exceptions and broker error codes; the table na
 | Consumer-group rebalance                                               | Partitions revoked and assigned                                                | Client    | Yes; resume assigned partitions from committed offsets (B-KFK-39)           |
 | Committed offset outside retained data, or expired                     | `OffsetOutOfRangeException`, `NoOffsetForPartitionException`                   | Client    | No automatic retry; surface the gap (B-KFK-40)                              |
 | Record not decodable, or of an unsupported `cdcspecversion`            | `RecordDeserializationException`, or binding-level                             | Client    | No; stop at the record (B-KFK-15, B-KFK-53)                                 |
-| Partition count of a stream topic changes                              | Metadata                                                                       | Client    | No; stop (B-KFK-52)                                                         |
+| Partition count of a stream topic changes                              | Metadata                                                                       | Client    | No; SHOULD stop (B-KFK-70); otherwise undefined (B-KFK-51)                  |
 | Marker missing past the bounded wait                                   | (binding-level)                                                                | Client    | Alert; consumer guidance ([core Appendix A.10][core-a10])                   |
 | Event larger than the stream admits                                    | `RecordTooLargeException`, `MESSAGE_TOO_LARGE`                                 | Publisher | No; stop publishing until the operator acts (B-KFK-27)                      |
 | Another publisher instance took over                                   | `ProducerFencedException`, `InvalidProducerEpochException`                     | Publisher | No; this instance stops                                                     |

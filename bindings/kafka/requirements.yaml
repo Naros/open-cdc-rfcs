@@ -4,7 +4,7 @@ meta:
   binding_version: 0.3.0-wip
   tracks_wire: '0.3'
   tracks_spec: 0.7.0
-  updated: '2026-09-23'
+  updated: '2026-10-21'
   intro: 'Binding-scoped requirements register for the Kafka Protocol Binding. Identifiers are B-KFK-* and are stable once allocated: withdrawn requirements keep
     their number with level WITHDRAWN and numbers are never reused. "Publisher" is the component writing OpenCDC events to Kafka; "Deployment" is the Kafka cluster
     and the configuration of the stream topics (the delivery layer); "Client" rows are protocol mechanics required to read the stream correctly, not consumer processing
@@ -61,7 +61,7 @@ requirements:
   who: Publisher
   section: '1.4'
   requirement: 'Each topic MUST carry only the records listed for its role in the Section 1.4 table: STREAM_METADATA, OBJECT_METADATA, and DDL on the control topic;
-    DML, TRUNCATE, snapshot.READ, and permitted tombstones on data topics.'
+    DML, TRUNCATE, snapshot.READ, and permitted tombstones on data topics; TRX_COMMIT and HEARTBEAT on the transaction topic.'
 - id: B-KFK-10
   level: MUST
   who: Deployment
@@ -129,13 +129,15 @@ requirements:
   level: MUST
   who: Publisher
   section: '3.4'
-  requirement: A data-topic record key MUST be a deterministic, non-null function of row identity (primary key, else a selected unique key, else subject; TRUNCATE
-    by subject), in an encoding that MUST NOT change for the life of the stream, including the subject on compacted multi-subject topics.
+  requirement: A data-topic record key MUST be a deterministic function of row identity (the key values of primary_key; for a keyless table the subject, or a
+    null key; TRUNCATE by subject or a null key), in an encoding that MUST NOT change for the life of the stream, and on a compacted multi-subject topic MUST include
+    the subject.
 - id: B-KFK-22
   level: MUST
   who: Publisher
   section: '3.4'
-  requirement: The partition of a data-topic record MUST be a deterministic function of key and partition count that does not change for the life of the stream.
+  requirement: The partition of a data-topic record MUST be a deterministic function of key and partition count that does not change for the life of the stream;
+    a null-keyed record is exempt.
 - id: B-KFK-23
   level: MUST
   who: Publisher
@@ -162,7 +164,7 @@ requirements:
   level: MUST
   who: Publisher and Deployment
   section: '3.6'
-  requirement: Broker message.max.bytes and topic max.message.bytes MUST be set on every stream topic and max.request.size MUST be at least the topic limit; a record
+  requirement: Topic max.message.bytes MUST be set on every stream topic (broker message.max.bytes is only its default) and max.request.size MUST be at least the topic limit; a record
     rejected as too large MUST stop publishing and MUST NOT be truncated, dropped, skipped, or diverted.
 - id: B-KFK-28
   level: MUST
@@ -212,7 +214,7 @@ requirements:
   who: Deployment
   section: '4.2'
   requirement: (Marker retention parity) retention.bytes MUST be -1 on the transaction topic and on data topics whose cleanup.policy includes delete, and transaction-topic
-    retention.ms MUST exceed the maximum data replay horizon plus segment.ms plus the retention check interval.
+    retention.ms MUST exceed the maximum, over the data topics, of each data topic's replay horizon (its term in the B-KFK-45 replay window) plus its segment.ms plus the retention check interval.
 - id: B-KFK-36
   level: MUST
   who: Relay
@@ -235,7 +237,7 @@ requirements:
   level: MUST
   who: Client
   section: '5.2'
-  requirement: A resuming client MUST resume every partition of every stream topic it reads, the transaction topic included, from offsets committed only after processing.
+  requirement: A resuming client MUST resume every partition of every stream topic it reads other than the control topic (B-KFK-38), the transaction topic included, from offsets committed only after processing.
 - id: B-KFK-40
   level: MUST
   who: Client

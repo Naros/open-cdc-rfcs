@@ -511,7 +511,8 @@ A stream can therefore carry no `dml.TRUNCATE` for a table that was truncated at
 
 - **B-KFK-26.** This binding defines no application-level chunking or truncation of events.
   Truncating LOB values, DDL text, or records to a size ceiling is a payload change governed by the core ([Section 6.2][core-6-2], [Section 6.3][core-6-3], [Section 9][core-9]); a publisher that truncates is not emitting the core's events and MUST NOT claim this binding for that stream.
-- **B-KFK-27 (Publisher and Deployment).** The largest event a stream admits is set by the deployment's broker `message.max.bytes` and topic `max.message.bytes`, which the deployment MUST set on every stream topic, the control topic included, and by the publisher's `max.request.size`, which MUST be at least the topic limit.
+- **B-KFK-27 (Publisher and Deployment).** The largest event a stream admits is set by the topic setting `max.message.bytes`, which the deployment MUST set on every stream topic, the control topic included, and by the publisher's `max.request.size`, which MUST be at least the topic limit.
+  The broker setting `message.max.bytes` is only the default that `max.message.bytes` overrides.
   These limits apply to the whole record batch, including key, headers (every attribute, in binary mode), and batch overhead, not to the event alone.
   A record the producer or broker rejects as too large is a configuration error: the publisher MUST stop publishing the stream and MUST NOT truncate, drop, skip, or divert the event (for example to a dead-letter topic).
 
@@ -580,7 +581,7 @@ A single-partition profile that would preserve `ordering_scope: "stream"` end to
   When `schema_on_each_event` is `true`, the publisher SHOULD still observe this barrier; if it does not, it MAY send a data record before the control-topic acknowledgement, except as B-KFK-59 requires, but it MUST hand the standalone OBJECT_METADATA to its Kafka producer (`send()` in the Java client) before it hands over the first data record naming it ([core Section 4.5.1][core-4-5-1]), MUST NOT advance its source checkpoint (B-KFK-47) past that data record until the OBJECT_METADATA is acknowledged, and MUST stop publishing if that send ends in a non-retriable error, including expiry of the producer's delivery timeout (B-KFK-53); `dataschema` MUST still reference it.
   In that mode a client finds a data record's schema in its `_schema` (B-KFK-68), and the control-topic record can become readable after the data record ([core Appendix A.2][core-a2]).
 - **B-KFK-35 (Marker retention parity).** The deployment MUST set `retention.bytes=-1` on the transaction topic and on every data topic whose `cleanup.policy` includes `delete`; on a `compact`-only topic the setting has no effect.
-  It MUST set the transaction topic's `retention.ms` greater than the maximum, over the data topics, of the topic's replay horizon plus `segment.ms` plus the broker's `log.retention.check.interval.ms`, where a data topic's replay horizon is its `min.compaction.lag.ms` if compaction is enabled and its `retention.ms` otherwise.
+  It MUST set the transaction topic's `retention.ms` greater than the maximum, over the data topics, of each data topic's replay horizon plus its `segment.ms` plus the broker's `log.retention.check.interval.ms`, where a data topic's replay horizon is its term in the replay window of B-KFK-45: its `min.compaction.lag.ms` (or `retention.ms`, if smaller and the policy also includes `delete`) if compaction is enabled, and its `retention.ms` otherwise.
   If any data topic with `cleanup.policy=delete` has `retention.ms=-1`, the transaction topic MUST as well.
   Kafka deletes whole segments, so a data record can outlive its topic's `retention.ms` by up to one segment roll; the margin keeps the marker for every retained data event (P-RET-1, R-POS-6).
 - **B-KFK-36 (Intermediary integrity).** A relay that copies a stream MUST copy all of its topics, control and transaction topics included, and MUST deliver them under a configuration that satisfies 1.4 and 4.2.
@@ -632,7 +633,7 @@ The positions a client can start from are:
 | Latest                  | Records written after the client starts                            | End offset of each partition                                  |
 | Timestamp               | Records written at or after a point in time                        | `offsetsForTimes` on record timestamps (B-KFK-41)             |
 
-- **B-KFK-39 (Client).** A resuming client MUST resume every partition of every stream topic it reads, the transaction topic included, from offsets it committed only after processing the corresponding records.
+- **B-KFK-39 (Client).** A resuming client MUST resume every partition of every stream topic it reads other than the control topic (B-KFK-38), the transaction topic included, from offsets it committed only after processing the corresponding records.
   A client MUST treat offsets as the mechanical checkpoint and `cdcpos` as the logical position of record ([core Appendix B.4][core-b4]).
 - **B-KFK-40 (Client).** A client MUST NOT let `auto.offset.reset` reposition it silently.
   It MUST configure `auto.offset.reset=none` and set its initial positions explicitly.

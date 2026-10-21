@@ -203,7 +203,9 @@ requirements:
   who: Publisher and Deployment
   section: '4.2'
   requirement: (Schema retention across the replay window) Every schema version stays retrievable, and a data-topic record MUST NOT be written until the OBJECT_METADATA
-    its dataschema names is acknowledged on the control topic.
+    its dataschema names is acknowledged on the control topic; under schema_on_each_event this wait is a SHOULD, while the OBJECT_METADATA MUST still be handed
+    to the producer first, the source checkpoint MUST NOT pass the data record until it is acknowledged, a non-retriable send error MUST stop publishing (B-KFK-53), and dataschema MUST
+    still reference it.
 - id: B-KFK-35
   level: MUST
   who: Deployment
@@ -249,7 +251,8 @@ requirements:
   level: MUST
   who: Client
   section: '5.3'
-  requirement: On a data event whose dataschema is not cached, a client MUST read the control topic to its current end before treating the event as undecodable.
+  requirement: On a data event whose dataschema is not cached and that carries no _schema, a client MUST read the control topic to its current end before treating
+    the event as undecodable.
 - id: B-KFK-43
   level: MUST
   who: Publisher
@@ -385,3 +388,17 @@ requirements:
   who: Client
   section: '6.1'
   requirement: A client MUST read the stream's control topic and transaction topic, and the data topic of every subject whose events it processes.
+- id: B-KFK-67
+  level: MUST
+  who: Deployment
+  section: '1.4'
+  requirement: A data topic whose cleanup.policy includes compact MUST NOT receive a record with a null key; the deployment MUST NOT give such a policy to a data
+    topic, at creation or later, while the publisher writes null keys to it (B-KFK-21).
+- id: B-KFK-68
+  level: MUST
+  who: Publisher and Client
+  section: '1.4'
+  requirement: DDL events and standalone OBJECT_METADATA are control-topic records in every schema delivery mode; under schema_on_each_event every dml.* record,
+    TRUNCATE included, and every snapshot.READ record (beyond the core text) also carries _schema, counted in size limits and never omitted to fit them; a client
+    whose cache lacks a record's dataschema MAY decode from _schema instead of reading the control topic, with no defined check against dataschema, while B-KFK-52,
+    B-KFK-64, and B-KFK-66 still apply.

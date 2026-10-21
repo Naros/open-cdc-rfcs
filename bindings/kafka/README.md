@@ -197,6 +197,17 @@ Whether that is adequate for a given sink is a deployment decision; a sink that 
 | Transaction | 1          | `delete`         | TRX_COMMIT; HEARTBEAT                                                    | `cdcxid` for TRX_COMMIT; none for HEARTBEAT |
 | Data        | Fixed, 1 or more | `delete`, or compaction with a lag (B-KFK-7) | `dml.*` (including TRUNCATE where captured, 3.5), `snapshot.READ`; tombstones on compacted topics (B-KFK-62) | Row identity, or the subject (B-KFK-21)   |
 
+- **B-KFK-68 (Publisher and Client).** DDL events and standalone OBJECT_METADATA are control-topic records whatever `schema_delivery` declares.
+  When `schema_on_each_event` is `true`, every `dml.*` record, TRUNCATE included (P-ORD-4), and every `snapshot.READ` record also carries `_schema` in its `data` ([core Section 4.5.3][core-4-5-3]); a tombstone (B-KFK-62) has no value and carries none.
+  The core names `snapshot.READ` alongside DML rather than within it; this binding requires `_schema` on `snapshot.READ` as well, because a consumer typically sees a table's READ records before any of its other events.
+  In binary content mode `_schema` is a key of the record value (B-KFK-20), and no header carries it.
+  This moves no record to another topic, does not remove the standalone OBJECT_METADATA that `dataschema` still references, relaxes B-KFK-34 only as that rule states, and does not relax B-KFK-59.
+  The size limits of B-KFK-27 apply to the record including `_schema`; the publisher MUST NOT omit or truncate `_schema` to fit them (P-SCHEMA-5, B-KFK-26), and an event that no longer fits is handled as in B-KFK-27.
+  A client whose schema cache lacks a record's `dataschema` MAY decode the record from its `_schema` instead of reading the control topic ([core Appendix A.2][core-a2], C-ORD-1(a)); the core's "consistent version" condition is the client's to apply, and this binding defines no check between `_schema` and the OBJECT_METADATA that `dataschema` names.
+  B-KFK-52 and B-KFK-66 still apply, and so does B-KFK-64 for a client that assembles transactions.
+
+*Note.* A `snapshot.READ` record's `data` has the DML structure (core Section 9.3) and satisfies the core DML data schema, which defines `_schema`; the core does not say which data schema validates it (8.3 item 12).
+
 *Why a transaction topic with one partition.* Data events are spread over many partitions and lose their cross-partition order.
 The transaction topic restores it: because it has one partition, one writer (B-KFK-60), and the publisher writes markers in commit order (B-KFK-43), the sequence of TRX_COMMIT records on it, after deduplication by `(source, id)`, is the source commit order of the stream.
 Duplicates appear only after a publisher restart (B-KFK-47).
@@ -351,6 +362,27 @@ content-type: application/cloudevents+json; charset=UTF-8
 -----------------------------------------------
 ```
 
+With `schema_on_each_event: true`, the same INSERT's `data` also carries `_schema`, the complete OBJECT_METADATA data that `dataschema` names (B-KFK-68); `dataschema` is unchanged.
+`columns` and `json_schema` are abridged here for display:
+
+```text
+  "data": {
+    "table":       { "schema": "FINANCE", "name": "ORDERS" },
+    "primary_key": ["ORDER_ID"],
+    "before":      null,
+    "after":       { "ORDER_ID": 1001, "STATUS": "PENDING", "AMOUNT": "199.99" },
+    "_null_columns": [], "_lob_overflow": [],
+    "_schema": {
+      "table":          { "schema": "FINANCE", "name": "ORDERS" },
+      "schema_version": 2,
+      "primary_key":    ["ORDER_ID"],
+      "columns":        [ { "name": "ORDER_ID", "ordinal": 1, ... }, ... ],
+      "json_schema":    { ... }
+    },
+    "pos": { ... }
+  }
+```
+
 ### 3.3. Binary Content Mode
 
 - **B-KFK-20.** In binary mode the record value MUST be the event's `data` serialized as JSON, UTF-8 encoded, and the `content-type` header MUST carry the event's `datacontenttype` (`application/json`).
@@ -477,6 +509,8 @@ A stream can therefore carry no `dml.TRUNCATE` for a table that was truncated at
   These limits apply to the whole record batch, including key, headers (every attribute, in binary mode), and batch overhead, not to the event alone.
   A record the producer or broker rejects as too large is a configuration error: the publisher MUST stop publishing the stream and MUST NOT truncate, drop, skip, or divert the event (for example to a dead-letter topic).
 
+With `schema_on_each_event`, a deployment sizes `max.message.bytes` for the event plus `_schema`, and broker storage for the larger records, before enabling the mode on wide tables; a snapshot carries `_schema` on every row (B-KFK-68).
+
 *Note.* Kafka clients return a record batch larger than `fetch.max.bytes` or `max.partition.fetch.bytes` rather than stalling, so a client needs no fetch configuration to make progress past a large event.
 It does need memory for the largest record the topics accept, which it can read from their `max.message.bytes` (B-KFK-65).
 
@@ -499,11 +533,11 @@ The publisher emits STREAM_METADATA as usual ([core Section 10.4][core-10-4]); t
 | `transaction_marker_delivery`          | `"transaction_metadata_channel"`                | The transaction topic (B-KFK-29)                                                                      |
 | `schema_delivery.schema_on_change`     | `true`                                          | Core requirement, unchanged                                                                           |
 | `schema_delivery.schema_on_reconnect`  | Producer-declared                               | Realized by the control topic when declared ([core Section 4.5.2][core-4-5-2]); see B-KFK-30         |
-| `schema_delivery.schema_on_each_event` | Producer-declared                               | Required by the core only when `schema_on_reconnect` is not declared (P-SCHEMA-4)                     |
+| `schema_delivery.schema_on_each_event` | Producer-declared                               | Required by the core only when `schema_on_reconnect` is not declared (P-SCHEMA-4); see B-KFK-68       |
 | `schema_delivery.schema_by_reference`  | Producer-declared                               | A schema registry is a supplement; `cdcschemauri` never replaces the control topic ([core Section 4.4][core-4-4]) |
 | `sequence_continuity`                  | Producer-declared                               | Describes `pos.lsn`, not Kafka offsets                                                                |
 | `transaction_visibility`               | `"committed_only"`                              | Core default                                                                                          |
-| `ddl_capture`                          | Producer-declared                               | DDL events are control-topic records (B-KFK-9)                                                        |
+| `ddl_capture`                          | Producer-declared                               | DDL events are control-topic records in every schema delivery mode (B-KFK-9, B-KFK-68)                |
 | `tables`                               | Every captured table of *this stream*           | Each table's row events are on one data topic (B-KFK-30)                                              |
 
 - **B-KFK-28.** STREAM_METADATA MUST declare `session_aware: false` or omit it.
@@ -532,8 +566,10 @@ A single-partition profile that would preserve `ordering_scope: "stream"` end to
 - **B-KFK-33 (Control-channel retention).** The deployment MUST keep, on the control topic, the latest STREAM_METADATA, every OBJECT_METADATA version, and every DDL event the publisher has written, for the life of the stream.
   With `cleanup.policy=compact`, the keys of B-KFK-23, and no tombstones (B-KFK-25), compaction removes only superseded STREAM_METADATA.
 - **B-KFK-34 (Schema retention across the replay window).** Because the control topic never removes a schema version, every OBJECT_METADATA version that governs a retained data event remains retrievable, which realizes R-POS-7 for the whole replay window.
-  In addition, the publisher MUST NOT write a record to a data topic whose `dataschema` names an OBJECT_METADATA version until that version's control-topic record has been acknowledged by the cluster.
-  A client that sees a data-topic event can therefore always find its schema on the control topic (5.3).
+  In addition, except under `schema_on_each_event` (below), the publisher MUST NOT write a record to a data topic whose `dataschema` names an OBJECT_METADATA version until that version's control-topic record has been acknowledged by the cluster.
+  Outside that mode, a client that sees a data-topic event can therefore always find its schema on the control topic (5.3).
+  When `schema_on_each_event` is `true`, the publisher SHOULD still observe this barrier; if it does not, it MAY send a data record before the control-topic acknowledgement, except as B-KFK-59 requires, but it MUST hand the standalone OBJECT_METADATA to its Kafka producer (`send()` in the Java client) before it hands over the first data record naming it ([core Section 4.5.1][core-4-5-1]), MUST NOT advance its source checkpoint (B-KFK-47) past that data record until the OBJECT_METADATA is acknowledged, and MUST stop publishing if that send ends in a non-retriable error, including expiry of the producer's delivery timeout (B-KFK-53); `dataschema` MUST still reference it.
+  In that mode a client finds a data record's schema in its `_schema` (B-KFK-68), and the control-topic record can become readable after the data record ([core Appendix A.2][core-a2]).
 - **B-KFK-35 (Marker retention parity).** The deployment MUST set `retention.bytes=-1` on the transaction topic and on every data topic whose `cleanup.policy` includes `delete`; on a `compact`-only topic the setting has no effect.
   It MUST set the transaction topic's `retention.ms` greater than the maximum, over the data topics, of the topic's replay horizon plus `segment.ms` plus the broker's `log.retention.check.interval.ms`, where a data topic's replay horizon is its `min.compaction.lag.ms` if compaction is enabled and its `retention.ms` otherwise.
   If any data topic with `cleanup.policy=delete` has `retention.ms=-1`, the transaction topic MUST as well.
@@ -602,8 +638,9 @@ How a consumer treats that boundary is consumer guidance ([core Appendix A.7][co
 
 ### 5.3. Schema Resolution
 
-- **B-KFK-42 (Client).** When a client reads a data event whose `dataschema` is not in its schema cache, it MUST read the control topic to its current end before treating the event as undecodable.
-  Under B-KFK-34 the schema is on the control topic by the time the data record exists; a miss is a race between independently progressing partitions, not corruption ([core Appendix A.2][core-a2]).
+- **B-KFK-42 (Client).** When a client reads a data event whose `dataschema` is not in its schema cache and that carries no `_schema`, it MUST read the control topic to its current end before treating the event as undecodable.
+  Unless `schema_on_each_event` relaxes B-KFK-34, the schema is on the control topic by the time the data record exists; a miss is a race between independently progressing partitions, not corruption ([core Appendix A.2][core-a2]).
+  A record that carries `_schema` can be decoded from it instead (B-KFK-68).
 
 - **B-KFK-59.** When the publisher writes a `ddl.CREATE` whose `dataschema` is a forward reference ([core Section 9.1][core-9-1]), it MUST write the named OBJECT_METADATA to the control topic after the CREATE, and both MUST be acknowledged before the subject's first DML or `snapshot.READ` record is written.
   Because DDL events and OBJECT_METADATA share the control topic's single partition, the CREATE and its governing OBJECT_METADATA are on one channel with the OBJECT_METADATA following, as the core requires ([core Section 4.1][core-4-1]).
@@ -800,6 +837,8 @@ Notes:
 4. Transforms run before the converters.
    Where the OpenCDC ordinals and markers are assigned (by the connector, a transform, or the converter) decides which transforms may still filter records.
 
+*Note.* Under `schema_on_each_event`, the checkpoint clause of B-KFK-34 is met when the OBJECT_METADATA goes through the task's own producer in or before the `poll()` batch holding the data record; a control topic written from another producer (for example, inside a transform) meets it only if that producer is flushed before the data record is returned.
+
 A sink connector reads the stream through the framework's consumer-group subscription, which delivers records from every subscribed topic interleaved, commits offsets for each, and spreads partitions across tasks.
 That subscription suits the data topics, but not the control topic.
 
@@ -841,6 +880,7 @@ Runtime settings are in 7.1, and for Debezium Server in 7.3.
 | `heartbeat.interval.ms`, `topic.heartbeat.prefix`                 | Converted                       | Debezium heartbeats are source-offset keep-alives on their own topic; OpenCDC HEARTBEAT goes to the transaction topic (B-KFK-49) |
 | Schema history topic (log-based connectors that keep one)        | Out of scope, and add           | Internal DDL history is not OBJECT_METADATA; the control topic must be added (B-KFK-33) (6)                                    |
 | `include.schema.changes` (schema change topic)                    | Mapped with constraint          | DDL events go to the control topic, not a data topic (B-KFK-9), which keeps every one for the life of the stream (B-KFK-33); `false` means `ddl_capture: "none"` (8); with `true` the publisher writes as `ddl.*` only events that record a source DDL operation (9, 11) and declares `ddl_capture` from the text they carry (10) |
+| `_schema` (no Debezium option)                                    | Add                             | Not provided; `JsonConverter` with `schemas.enable=true` embeds a Connect schema, which is not OBJECT_METADATA (no `schema_version` or `json_schema`), so the publisher builds `_schema` from the table schema it already holds, with the `schema_version` of the OBJECT_METADATA that `dataschema` names (B-KFK-68)                                                                                        |
 | `decimal.handling.mode=double`                                    | Excluded                        | Loses precision (P-TYPE-4)                                                                                                     |
 | `time.precision.mode`, `binary.handling.mode`                     | Converted                       | Wire encoding follows the type system's `logical_type`, whatever the Debezium representation                                   |
 | `column.exclude.list`, `table.include.list`                       | Mapped                          | Define the emission schema and captured tables; OBJECT_METADATA follows changes (core Section 4.1)                              |
@@ -886,7 +926,7 @@ Other publishers are recorded once their own documentation has been reviewed (Se
 | Kafka producer setting, API, or publisher behavior                | Disposition                     | Note                                                                                                                           |
 | ----------------------------------------------------------------- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
 | `acks`, `enable.idempotence`, `max.in.flight.requests.per.connection` | Fixed                       | `acks=all`, with idempotence on or one request in flight, set by the publisher on the producer it creates (B-KFK-32, B-KFK-46) (1) |
-| `send()` acknowledgement (`Future`, `Callback`)                   | Mapped with constraint          | Gates each dependent write: STREAM_METADATA before other records (B-KFK-37, B-KFK-50), OBJECT_METADATA before data naming it (B-KFK-34), a transaction's records before its TRX_COMMIT (B-KFK-43), and the source checkpoint (B-KFK-47) (2) |
+| `send()` acknowledgement (`Future`, `Callback`)                   | Mapped with constraint          | Gates each dependent write: STREAM_METADATA before other records (B-KFK-37, B-KFK-50), OBJECT_METADATA before data naming it (B-KFK-34; under `schema_on_each_event`, before the source checkpoint instead), a transaction's records before its TRX_COMMIT (B-KFK-43), and the source checkpoint (B-KFK-47) (2) |
 | `transactional.id`, `initTransactions()`                          | Mapped with constraint          | Fences a previous producer holding the same `transactional.id` (B-KFK-60); a stable `transactional.id` per writer, with `initTransactions()` on every start (3) |
 | `beginTransaction()`, `commitTransaction()` ([KIP-98][kip-98])    | Optional                        | Writes a transaction's records and its TRX_COMMIT in one or more Kafka transactions committed in produce order, or in exactly one if the publisher aligns its transaction boundaries with source transactions, which satisfies the visibility part of B-KFK-43 for `read_committed` clients (B-KFK-48) (2) |
 | Source checkpoint                                                 | Mapped with constraint          | Advanced only after acknowledgement, or after the Kafka transaction that holds the record commits (B-KFK-47) (2)              |
@@ -952,6 +992,12 @@ None is ratified; each is a place where this draft made a call so that review ha
     Every member the descriptor carried was client configuration, carried on each record (content mode, `subject`), or topic configuration read from Kafka, and keeping a copy on the control topic was the source of repeated drift and ownership problems.
     B-KFK-16, B-KFK-56, and B-KFK-57 are withdrawn.
 16. Ordering a TRUNCATE in the compacted region is a documented limitation rather than a client or topic mechanism: a deployment that needs transaction fidelity or correct state across a TRUNCATE beyond the replay window avoids multi-partition compaction for those tables (B-KFK-7), adopted on 23 September 2026 after review.
+17. `schema_on_each_event` changes what a DML or `snapshot.READ` record carries, not where any record is written (B-KFK-68), adopted on 21 October 2026 after review.
+    DDL stays on the control topic in every schema delivery mode (decision 11): core Section 4.5.1 keeps the standalone OBJECT_METADATA mandatory and Section 4.5.3 requires `dataschema` to still reference it, and transaction assembly (B-KFK-64) and forward references (B-KFK-59) depend on a single location for DDL.
+    The binding requires `_schema` on `snapshot.READ` as well, beyond the core text (8.3 item 12).
+    In this mode a client that decodes from `_schema` need not read the control topic for schema, and the publisher's acknowledgement barrier (B-KFK-34) is a SHOULD: the control topic may be written by a different producer from the data topics, and Kafka orders records neither across producers nor across topics.
+    The publisher still hands the OBJECT_METADATA to its producer first and holds its source checkpoint until the OBJECT_METADATA is acknowledged, so a failed control-topic write is replayed on restart rather than leaving `dataschema` dangling.
+    The binding defines no check between `_schema` and the OBJECT_METADATA that `dataschema` names, as the core defines none.
 
 ### 8.2. Deferred Features
 
@@ -1005,6 +1051,9 @@ Recorded so they are not lost:
     Separately, some source DDL operations reach a producer only with reconstructed or rewritten statement text (7.2 note 10).
     Under `ddl_capture: "verbatim"` the core allows no event without the source's own text, so a producer that cannot always supply it must declare `"structural"`, giving up statement text for every event, or `"none"`, giving up the coverage floor (P-DDL-1).
     The core should decide whether to allow a per-event structural shape under `"verbatim"`, or to confirm that such a producer declares `"structural"`; consumers that audit or replay DDL rely on every `"verbatim"` event carrying source text.
+12. **`_schema` on `snapshot.READ`.** Core Section 4.5.3 and P-SCHEMA-5 require `_schema` in "every DML event", and Sections 4.1 (P-ORD-4) and 4.5.1 name `snapshot.READ` alongside DML, not within it.
+    This binding requires `_schema` on `snapshot.READ` as well (B-KFK-68), because snapshot records are typically the first a consumer sees for a table, and a consumer without a schema cache is the case Schema on Each Event exists for.
+    The core should state that `snapshot.READ` is covered, and which data schema validates a `snapshot.READ` record's `data`; conformance tooling that validates it against anything other than the DML data schema may reject this binding's output.
 
 ### 8.4. Open Items
 
@@ -1048,7 +1097,9 @@ Recorded so they are not lost:
 [core-2-4]: https://github.com/open-cdc-hq/open-cdc-spec/blob/main/spec/OpenCDC-Specification.md#24-closed-world-schemas
 [core-3-3]: https://github.com/open-cdc-hq/open-cdc-spec/blob/main/spec/OpenCDC-Specification.md#33-cloudevents-extension-attributes-for-opencdc
 [core-4-4]: https://github.com/open-cdc-hq/open-cdc-spec/blob/main/spec/OpenCDC-Specification.md#44-schema-delivery-modes
+[core-4-5-1]: https://github.com/open-cdc-hq/open-cdc-spec/blob/main/spec/OpenCDC-Specification.md#451-schema-on-change-mandatory
 [core-4-5-2]: https://github.com/open-cdc-hq/open-cdc-spec/blob/main/spec/OpenCDC-Specification.md#452-schema-on-reconnect-optional-default-off
+[core-4-5-3]: https://github.com/open-cdc-hq/open-cdc-spec/blob/main/spec/OpenCDC-Specification.md#453-schema-on-each-event-optional-default-off
 [core-6-2]: https://github.com/open-cdc-hq/open-cdc-spec/blob/main/spec/OpenCDC-Specification.md#62-type-fidelity-obligations
 [core-6-3]: https://github.com/open-cdc-hq/open-cdc-spec/blob/main/spec/OpenCDC-Specification.md#63-lob-handling-obligations
 [core-4-1]: https://github.com/open-cdc-hq/open-cdc-spec/blob/main/spec/OpenCDC-Specification.md#41-schema-availability-guarantee

@@ -71,25 +71,26 @@ requirements:
   level: MUST
   who: Publisher and Client
   section: '1.5'
-  requirement: The publisher and clients MUST validate the broker certificate chain and host identity and MUST NOT proceed past a failed validation.
+  requirement: The publisher and clients MUST verify the broker certificate chain and that it identifies the host connected to, and MUST NOT proceed past a failed
+    verification; disabling hostname verification does not satisfy this.
 - id: B-KFK-12
   level: MUST
-  who: Publisher and Client
+  who: Publisher, Client, and Deployment
   section: '1.5'
-  requirement: Principals MUST authenticate with mutual TLS or SASL (SCRAM, OAUTHBEARER, GSSAPI; PLAIN only over TLS); credentials MUST NOT appear in headers, keys,
-    or topic names.
+  requirement: The publisher and clients MUST authenticate, with mutual TLS or a SASL mechanism that discloses no reusable credential to anyone but the broker (for
+    example SCRAM, OAUTHBEARER, GSSAPI; PLAIN only over TLS), and the deployment MUST NOT accept unauthenticated, anonymous, or unverified-token connections.
 - id: B-KFK-13
   level: MUST
   who: Deployment
   section: '1.5'
-  requirement: The deployment MUST NOT grant Write on stream topics or the publisher TransactionalId to any principal but the publisher or a relay, and MUST restrict
-    Alter, AlterConfigs, CreatePartitions, and Delete to administrators.
+  requirement: The deployment MUST NOT allow any principal but the publisher or a relay to write to stream topics or use the publisher's transactional.id, nor any
+    but an administrator to alter, reconfigure, delete, or delete records from them, whether or not the cluster enforces ACLs.
 - id: B-KFK-14
   level: MUST
-  who: Deployment
+  who: Publisher and Deployment
   section: '1.5'
   requirement: The stream is the unit of authorization; a table or schema that must be withheld from some readers MUST be placed in a separate stream; core S-AUTH-2,
-    S-AUTHZ-1, S-AUTHZ-2 apply unchanged.
+    S-AUTHZ-1, S-AUTHZ-2 apply unchanged, and credentials MUST NOT appear in record headers, record keys, or topic names.
 - id: B-KFK-15
   level: MUST
   who: Publisher and Client

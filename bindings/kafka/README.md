@@ -241,24 +241,30 @@ The transaction topic's `retention.ms` (9 days) exceeds the data topics' `retent
 
 The core's transport-security guidance ([core Section 14.2][core-14-2]) is SHOULD-level and defers the mechanism to the binding.
 This binding fixes the mechanism.
+Its rules are stated in terms of the Kafka protocol and broker (listener security protocols, SASL mechanisms, ACL operations), which are the same for every client; client configuration properties appear only as examples.
+A relay is a client of its source topics and a publisher to its target topics, and the Client and Publisher rules of this section bind it accordingly.
 
 - **B-KFK-10 (Deployment).** Every listener used by the publisher, by clients, or by relays for a claimed stream MUST use TLS 1.2 or later (security protocol `SSL` or `SASL_SSL`).
   `PLAINTEXT` and `SASL_PLAINTEXT` listeners do not satisfy this binding.
-- **B-KFK-11 (Publisher and Client).** The publisher and every client MUST validate the broker's certificate chain and host identity and MUST NOT proceed past a failed validation.
-  Setting `ssl.endpoint.identification.algorithm` to an empty value disables host identity validation; a component so configured is not operating under this binding.
-- **B-KFK-12.** Principals MUST authenticate with mutual TLS or a SASL mechanism (`SCRAM-SHA-256`, `SCRAM-SHA-512`, `OAUTHBEARER`, or `GSSAPI`).
-  SASL `PLAIN` is permitted only over TLS.
-  Credentials MUST NOT appear in record headers, record keys, or topic names; core S-AUTH-2 already forbids them in events.
-- **B-KFK-13 (Deployment).** The deployment MUST NOT grant `Write` on a stream's topics, or `Write` on the publisher's `TransactionalId`, to any principal other than the publisher, or a relay writing to its own target topics.
-  It MUST restrict `Alter` (which also authorizes `CreatePartitions`), `AlterConfigs`, and `Delete` (which permits `DeleteRecords`) on stream topics to administrators.
+- **B-KFK-11 (Publisher and Client).** The publisher and every client MUST verify the broker's certificate chain and that the certificate identifies the host connected to, and MUST NOT proceed past a failed verification.
+  Disabling hostname verification does not satisfy this rule.
+- **B-KFK-12 (Publisher, Client, and Deployment).** The publisher and every client MUST authenticate, and the deployment MUST NOT accept an unauthenticated connection on a listener covered by B-KFK-10.
+  Authentication MUST use mutual TLS or a SASL mechanism that, over such a listener, discloses no reusable credential to anyone but the broker it verified under B-KFK-11, such as `SCRAM-SHA-256`, `SCRAM-SHA-512`, `OAUTHBEARER`, or `GSSAPI`; SASL `PLAIN` meets this only over TLS.
+  A connection authenticated as no principal (`User:ANONYMOUS` in Kafka), or by a token or credential that the broker does not cryptographically verify (for example `OAUTHBEARER` with the unsecured JWTs that Kafka's default handlers issue and accept), does not satisfy this rule.
+- **B-KFK-13 (Deployment).** The deployment MUST NOT allow any principal other than the publisher, or a relay writing to its own target topics, to write to a stream's topics or to use the publisher's `transactional.id`.
+  It MUST NOT allow any principal other than an administrator to alter a stream topic, change its configuration, delete it, or delete its records.
+  With Kafka ACLs these are `Write` on the topics and on the publisher's `TransactionalId` resource, and `Alter` (which also authorizes `CreatePartitions`), `AlterConfigs`, and `Delete` (which permits both `DeleteTopics` and `DeleteRecords`); the rule holds whether or not the cluster enforces ACLs, and a cluster that enforces none allows every principal to write.
   A principal that can write to a data topic can inject events that clients cannot distinguish from the producer's; one that can alter a topic can undo the configuration this binding relies on (4.2, 5.5, 5.8).
-- **B-KFK-14 (Deployment).** The stream is the unit of authorization.
+- **B-KFK-14 (Publisher and Deployment).** The stream is the unit of authorization.
   Kafka ACLs are topic-grained, and every principal that can read the control topic can read every captured table's schema and the stream's `tables` declaration.
   A deployment that must keep a table, or its schema, from some readers MUST place that table in a separate stream.
   Core producer rules S-AUTH-2, S-AUTHZ-1, and S-AUTHZ-2 ([core Section 14.1][core-14-1]) apply unchanged; masking configured per consumer identity (S-AUTHZ-2) is realized by a separate stream per identity.
+  Credentials MUST NOT appear in record headers, record keys, or topic names; S-AUTH-2 already forbids them in events.
 
 *Note.* S-AUTHZ-1 is directed at session-aware producers.
 A Kafka publisher is not session aware (4.1) and cannot tailor what one reader receives; that is why B-KFK-14 moves per-table authorization to the choice of stream boundaries.
+
+*Note.* In the Java client, and so in Kafka Connect, an empty `ssl.endpoint.identification.algorithm` disables the hostname verification B-KFK-11 requires; its default, `https`, enables it.
 
 ### 1.6. Transport Capabilities
 
@@ -768,11 +774,11 @@ A client configured with a topic pattern (for example Kafka Connect `topics.rege
 ### 5.9. Failure Behavior
 
 Failures fall in three places: establishment (a client or publisher cannot authenticate, is not authorized, or cannot find the stream), steady state (errors raised while reading or writing), and abnormal loss (a component stops without reporting).
-Kafka reports failures as client exceptions and broker error codes; the table names both where they differ.
+Kafka reports failures as client exceptions and broker error codes; the table names both where they differ, and names client exceptions as the Java client does, while other clients report the same conditions under their own names.
 
 | Condition                                                              | Kafka signal                                                                   | Party     | Disposition                                                                 |
 | ---------------------------------------------------------------------- | ------------------------------------------------------------------------------ | --------- | --------------------------------------------------------------------------- |
-| Authentication failed                                                  | `SaslAuthenticationException`, `SslAuthenticationException`                    | Both      | Retry only with new credentials                                             |
+| Authentication failed                                                  | `SASL_AUTHENTICATION_FAILED`, or `SslAuthenticationException` on a TLS failure | Both      | Retry only with new credentials                                             |
 | Not authorized for a stream topic or consumer group                    | `TopicAuthorizationException`, `GroupAuthorizationException`                   | Both      | No                                                                          |
 | A configured stream topic does not exist                               | `UNKNOWN_TOPIC_OR_PARTITION` persisting past metadata refresh                  | Client    | No; the client configuration is wrong                                       |
 | Leader change, broker restart, network interruption                    | Retriable errors (`NOT_LEADER_OR_FOLLOWER`, `NETWORK_EXCEPTION`, timeouts)     | Both      | Yes; handled by the Kafka client                                            |
